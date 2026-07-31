@@ -1,0 +1,21 @@
+name: Compliance record policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout immutable record tree
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify deterministic index, schemas, and local links
+        run: python3 scripts/check_compliance.py
