@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -238,6 +239,38 @@ class CompliancePolicyTests(unittest.TestCase):
             root=root,
         )
 
+    def git(self, root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=result.stderr.decode("utf-8", errors="replace"),
+        )
+        return result
+
+    def make_append_only_repository(self, root: Path) -> str:
+        protected = {
+            "aria2/versions/1.37.0.md": b"aria record\n",
+            "fetchii-core/versions/2026.03.17.md": b"core record\n",
+            "fetchii-core/versions/locks/2026.03.17.json": b"core lock\n",
+            "fetchii-core/versions/manifests/2026.03.17.json": b"manifest\n",
+        }
+        for relative, payload in protected.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        self.git(root, "init", "-b", "main")
+        self.git(root, "config", "user.name", "Compliance Test")
+        self.git(root, "config", "user.email", "compliance@example.invalid")
+        self.git(root, "add", ".")
+        self.git(root, "commit", "-m", "base records")
+        return self.git(root, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+
     def test_index_is_byte_deterministic_and_current(self) -> None:
         first = generate_index.render()
         second = generate_index.render()
@@ -292,7 +325,7 @@ class CompliancePolicyTests(unittest.TestCase):
         self.assertEqual(check_compliance.local_link_errors(), [])
 
     def test_repository_policy_main_passes(self) -> None:
-        self.assertEqual(check_compliance.main(), 0)
+        self.assertEqual(check_compliance.main([]), 0)
 
     def test_workflow_policy_requires_tests_read_only_permissions_and_pins(self) -> None:
         self.assertEqual(check_compliance.workflow_policy_errors(), [])
@@ -307,7 +340,9 @@ class CompliancePolicyTests(unittest.TestCase):
             )
             errors = check_compliance.workflow_policy_errors(root=root)
             self.assertTrue(any("read-only" in error for error in errors))
+            self.assertTrue(any("base history" in error for error in errors))
             self.assertTrue(any("unittest" in error for error in errors))
+            self.assertTrue(any("append-only" in error for error in errors))
             self.assertTrue(any("full commit" in error for error in errors))
         with tempfile.TemporaryDirectory() as temporary:
             errors = check_compliance.workflow_policy_errors(root=Path(temporary))
@@ -319,6 +354,102 @@ class CompliancePolicyTests(unittest.TestCase):
             path.write_bytes(b"\xff")
             errors = check_compliance.workflow_policy_errors(root=root)
             self.assertTrue(any("invalid UTF-8" in error for error in errors))
+
+    def test_append_only_history_allows_only_new_protected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            additions = {
+                "aria2/versions/1.38.0.md": b"new aria record\n",
+                "fetchii-core/versions/2026.03.18.md": b"new core record\n",
+                "fetchii-core/versions/locks/2026.03.18.json": b"new lock\n",
+                "fetchii-core/versions/manifests/2026.03.18.json": b"new manifest\n",
+            }
+            for relative, payload in additions.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            self.assertEqual(
+                check_compliance.append_only_history_errors(base, root=root), []
+            )
+
+    def test_append_only_history_rejects_coordinated_record_manifest_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            record = root / "fetchii-core/versions/2026.03.17.md"
+            manifest = root / "fetchii-core/versions/manifests/2026.03.17.json"
+            record.write_bytes(b"coordinated replacement record\n")
+            manifest.write_bytes(b"coordinated replacement manifest\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any(str(record.relative_to(root)) in e for e in errors))
+            self.assertTrue(any(str(manifest.relative_to(root)) in e for e in errors))
+
+    def test_append_only_history_rejects_delete_and_existing_lock_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            deleted = root / "aria2/versions/1.37.0.md"
+            rewritten_lock = (
+                root / "fetchii-core/versions/locks/2026.03.17.json"
+            )
+            deleted.unlink()
+            rewritten_lock.write_bytes(b"rewritten lock\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any("deleted or replaced" in error for error in errors))
+            self.assertTrue(any("protected bytes were modified" in e for e in errors))
+
+    def test_append_only_history_fails_closed_without_valid_base_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            self.assertTrue(
+                check_compliance.append_only_history_errors("", root=root)
+            )
+            self.assertTrue(
+                check_compliance.append_only_history_errors("f" * 40, root=root)
+            )
+            self.git(root, "checkout", "--orphan", "unrelated")
+            unrelated = root / "unrelated.txt"
+            unrelated.write_text("unrelated\n", encoding="utf-8")
+            self.git(root, "add", "unrelated.txt")
+            self.git(root, "commit", "-m", "unrelated history")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any("not an ancestor" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            errors = check_compliance.append_only_history_errors(
+                "a" * 40, root=Path(temporary)
+            )
+            self.assertTrue(any("git worktree" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            source = temporary_root / "source"
+            clone = temporary_root / "shallow"
+            source.mkdir()
+            base = self.make_append_only_repository(source)
+            clone_result = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--no-local",
+                    str(source),
+                    str(clone),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(clone_result.returncode, 0)
+            errors = check_compliance.append_only_history_errors(base, root=clone)
+            self.assertTrue(any("non-shallow" in error for error in errors))
 
     def test_core_lock_v2_accepts_exact_source_toolchain_and_six_scopes(self) -> None:
         self.assertEqual(self.validate_value(self.core_lock()), [])
@@ -618,6 +749,20 @@ class CompliancePolicyTests(unittest.TestCase):
                     errors = check_compliance.generated_record_errors(root=root)
                     self.assertTrue(
                         any("unsupported" in error for error in errors)
+                    )
+
+    def test_generated_policy_rejects_boolean_or_float_lock_schema(self) -> None:
+        for schema_version in (True, False, 2.0):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, lock_path, _ = self.make_record_tree(root)
+                    lock = self.core_lock()
+                    lock["schemaVersion"] = schema_version
+                    self.write_lock(lock_path, lock)
+                    errors = check_compliance.generated_record_errors(root=root)
+                    self.assertTrue(
+                        any("unsupported core lock schema" in error for error in errors)
                     )
 
     def test_generated_policy_requires_independent_release_manifest(self) -> None:

@@ -59,6 +59,11 @@ conflict, not a new filename. Core records accept only the matching artifact URL
 files; nested record directories other than the fixed `locks/` and `manifests/`
 sidecars are rejected and never indexed.
 
+Pull-request policy compares every existing record, lock, and release-manifest byte
+against the exact base commit. Existing protected paths cannot be edited, replaced, or
+deleted; a release is represented only by adding new fixed-version paths. The check
+fails closed when the base commit or its history is unavailable locally.
+
 The deterministic [`fetchii-releases.md`](fetchii-releases.md) page is a convenience
 index of component records. It is generated from the repository tree and checked in CI;
 the per-component records remain the primary path. The index does not claim to map app

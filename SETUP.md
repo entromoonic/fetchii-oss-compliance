@@ -63,6 +63,10 @@ and publisher. Every conforming production run must follow this order:
    `fetchii-core/versions/manifests/{version}.json` for the independent release claims.
    Do not add other nested version-record directories; repository policy rejects them
    and the index ignores them.
+   Pull requests fetch complete local history and run the append-only checker against
+   the event's exact base commit. Any changed or deleted existing record/lock/manifest,
+   missing base commit, shallow history, or unrelated base fails closed; only new fixed
+   paths are accepted.
 6. Publish the OSS record bundle with `publish_compliance.py`. It starts each retry from
    a fresh remote head, refuses conflicting immutable paths, regenerates the index, and
    uses a fast-forward-only push.

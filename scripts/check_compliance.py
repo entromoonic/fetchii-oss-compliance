@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ import stat
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 try:
@@ -318,7 +319,12 @@ def load_validated_lock(path: Path) -> tuple[dict[str, object], bytes]:
         "dependencies",
     }:
         raise ComplianceError("unexpected core lock fields")
-    if value.get("schemaVersion") != 2 or value.get("component") != "fetchii-core":
+    schema_version = value.get("schemaVersion")
+    if (
+        type(schema_version) is not int
+        or schema_version != 2
+        or value.get("component") != "fetchii-core"
+    ):
         raise ComplianceError("unsupported core lock schema")
     version = _require_calver(value.get("version"), label="core lock version")
     source = value.get("source")
@@ -944,6 +950,130 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
     return errors
 
 
+def _is_append_only_record_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if len(parts) == 3:
+        component, versions, filename = parts
+        return (
+            versions == "versions"
+            and filename.endswith(".md")
+            and component in {"aria2", "fetchii-core"}
+        )
+    if len(parts) == 4:
+        component, versions, sidecar, filename = parts
+        return (
+            component == "fetchii-core"
+            and versions == "versions"
+            and sidecar in {"locks", "manifests"}
+            and filename.endswith(".json")
+        )
+    return False
+
+
+def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as error:
+        raise ComplianceError(f"cannot execute local git: {error}") from error
+
+
+def append_only_history_errors(
+    base_commit: str, *, root: Path = ROOT
+) -> list[str]:
+    """Compare protected current bytes with their immutable PR-base blobs."""
+
+    if not isinstance(base_commit, str) or not COMMIT.fullmatch(base_commit):
+        return ["append-only base must be a full lowercase 40-character commit"]
+    try:
+        resolved_root = root.resolve(strict=True)
+        top_level = _run_git(resolved_root, "rev-parse", "--show-toplevel")
+    except (OSError, ComplianceError) as error:
+        return [f"append-only history cannot inspect repository: {error}"]
+    if top_level.returncode != 0:
+        return ["append-only history requires a readable local git worktree"]
+    try:
+        reported_root = Path(top_level.stdout.decode("utf-8").strip()).resolve(
+            strict=True
+        )
+    except (UnicodeDecodeError, OSError):
+        return ["append-only history received an invalid git worktree root"]
+    if reported_root != resolved_root:
+        return ["append-only history root is not the git worktree root"]
+
+    shallow = _run_git(resolved_root, "rev-parse", "--is-shallow-repository")
+    if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
+        return ["append-only history requires a complete non-shallow checkout"]
+
+    base_exists = _run_git(
+        resolved_root, "cat-file", "-e", f"{base_commit}^{{commit}}"
+    )
+    if base_exists.returncode != 0:
+        return ["append-only base commit is unavailable in local history"]
+    ancestor = _run_git(
+        resolved_root, "merge-base", "--is-ancestor", base_commit, "HEAD"
+    )
+    if ancestor.returncode != 0:
+        return ["append-only base commit is not an ancestor of HEAD"]
+
+    tree = _run_git(
+        resolved_root,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        base_commit,
+        "--",
+        "aria2/versions",
+        "fetchii-core/versions",
+    )
+    if tree.returncode != 0:
+        return ["append-only base tree cannot be enumerated"]
+
+    errors: list[str] = []
+    for raw_entry in tree.stdout.split(b"\0"):
+        if not raw_entry:
+            continue
+        try:
+            metadata, raw_path = raw_entry.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+            path = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return ["append-only base tree contains an unreadable entry"]
+        if not _is_append_only_record_path(path):
+            continue
+        if (
+            object_type != b"blob"
+            or mode not in {b"100644", b"100755"}
+            or not re.fullmatch(rb"[0-9a-f]{40}", object_id)
+        ):
+            errors.append(f"{path}: protected base entry is not a regular blob")
+            continue
+        base_blob = _run_git(
+            resolved_root, "cat-file", "blob", object_id.decode("ascii")
+        )
+        if base_blob.returncode != 0:
+            errors.append(f"{path}: protected base blob is unavailable")
+            continue
+        current_path = resolved_root.joinpath(*PurePosixPath(path).parts)
+        try:
+            current = _stable_regular_bytes(
+                current_path,
+                label=f"append-only path {path}",
+                max_bytes=100_000_000,
+            )
+        except ComplianceError:
+            errors.append(f"{path}: existing protected path was deleted or replaced")
+            continue
+        if current != base_blob.stdout:
+            errors.append(f"{path}: existing protected bytes were modified")
+    return errors
+
+
 def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
     path = root / POLICY_WORKFLOW
     label = display_path(path, root=root)
@@ -959,8 +1089,35 @@ def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     if not re.search(r"(?m)^permissions:\n  contents: read\n\njobs:", contents):
         errors.append(f"{label}: workflow permissions must remain read-only")
-    if "run: python3 -m unittest discover -s tests -v" not in contents:
+    checkout_pattern = re.compile(
+        r"(?m)^      - name: Checkout immutable record tree\n"
+        r"        uses: actions/checkout@[0-9a-f]{40}(?: #[^\n]*)?\n"
+        r"        with:\n"
+        r"          persist-credentials: false\n"
+        r"          fetch-depth: 0$"
+    )
+    if not checkout_pattern.search(contents):
+        errors.append(f"{label}: checkout must fetch PR base history")
+    unittest_pattern = re.compile(
+        r"(?m)^      - name: Run complete compliance policy unit suite\n"
+        r"        run: python3 -m unittest discover -s tests -v$"
+    )
+    if not unittest_pattern.search(contents):
         errors.append(f"{label}: full compliance unittest gate is missing")
+    append_only_pattern = re.compile(
+        r"(?m)^      - name: Enforce append-only compliance history\n"
+        r"        if: github\.event_name == 'pull_request'\n"
+        r"        env:\n"
+        r"          FETCHII_POLICY_BASE: "
+        r"\$\{\{ github\.event\.pull_request\.base\.sha \}\}\n"
+        r"        run: python3 scripts/check_compliance\.py --append-only-base "
+        r"\"\$FETCHII_POLICY_BASE\"$"
+    )
+    if (
+        "on:\n  pull_request:\n" not in contents
+        or not append_only_pattern.search(contents)
+    ):
+        errors.append(f"{label}: append-only PR-base gate is incomplete")
     for action in re.findall(
         r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", contents
     ):
@@ -970,7 +1127,10 @@ def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
     return errors
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--append-only-base")
+    args = parser.parse_args(argv)
     errors = []
     index = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "generate_index.py"), "--check"],
@@ -984,6 +1144,8 @@ def main() -> int:
     errors.extend(local_link_errors())
     errors.extend(generated_record_errors())
     errors.extend(workflow_policy_errors())
+    if args.append_only_base is not None:
+        errors.extend(append_only_history_errors(args.append_only_base))
     setup = (ROOT / "SETUP.md").read_text(encoding="utf-8")
     for forbidden in (
         'curl -fsSL "$SRC_URL"',
