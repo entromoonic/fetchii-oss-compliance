@@ -2,7 +2,9 @@
 # fetchii-core YYYY.MM.DD — corresponding-source record
 
 - **Schema:** `fetchii-core-record/v3`
-- **Artifact:** immutable versioned URL plus exact SHA-256
+- **Artifact:** exact
+  `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`
+  URL plus exact SHA-256
 - **Input lock:** relative link plus the exact lock SHA-256
 - **yt-dlp tag and commit:** exact CalVer tag plus the full 40-character commit
 - **Locked source object:** immutable version/commit/digest URL, SHA-256, and byte length
@@ -59,3 +61,5 @@ Missing mutagen, any missing scope, a floating or non-canonical version, a mutab
 missing source identity/size, non-canonical bytes, or a lock/record/artifact digest
 mismatch is release-blocking. Production records use the fixed path `{version}.md`; a
 same-version byte conflict must never be hidden behind a digest-suffixed filename.
+Production record bytes are matched in full against an independent lock-bound renderer;
+extra, duplicate, conflicting, or nested record fields are not accepted.

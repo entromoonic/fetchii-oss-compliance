@@ -48,7 +48,10 @@ six build scopes, immutable PyPI artifact URLs, and source hashes.
 Immutable release paths are version-keyed rather than digest-suffixed:
 `aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
 `fetchii-core/versions/locks/{version}.json`. Reusing a version with different bytes is
-a conflict, not a new filename.
+a conflict, not a new filename. Core records accept only the matching artifact URL
+`https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`;
+`latest`, a foreign host, or another path is invalid. Version records are top-level
+files; nested record directories are rejected and never indexed.
 
 The deterministic [`fetchii-releases.md`](fetchii-releases.md) page is a convenience
 index of component records. It is generated from the repository tree and checked in CI;

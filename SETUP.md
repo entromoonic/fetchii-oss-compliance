@@ -51,10 +51,13 @@ and publisher. Every conforming production run must follow this order:
    resolved dependency version, and each immutable PyPI URL/SHA-256. The build installs
    only lock entries.
 4. Render the record and evidence from that lock and the final artifact digest. The
-   evidence, object metadata, and OSS record must contain the same lock digest.
+   core record's artifact URL is exactly
+   `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`.
+   The evidence, object metadata, and OSS record must contain the same lock digest.
 5. Stage only the immutable source/lock objects. Record paths are fixed at
    `aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
-   `fetchii-core/versions/locks/{version}.json` for the core lock.
+   `fetchii-core/versions/locks/{version}.json` for the core lock. Do not add nested
+   version-record directories; repository policy rejects them and the index ignores them.
 6. Publish the OSS record bundle with `publish_compliance.py`. It starts each retry from
    a fresh remote head, refuses conflicting immutable paths, regenerates the index, and
    uses a fast-forward-only push.
@@ -86,7 +89,10 @@ python3 scripts/check_compliance.py
 ```
 
 CI runs the check form and a local Markdown-link scan. Adding a component record without
-regenerating the index fails the policy check.
+regenerating the index fails the policy check. A core record is accepted only when its
+entire byte sequence matches the independent lock-bound renderer, including display
+version, artifact, source, toolchain, license, build recipe, reproduction rules,
+dependency table, and fixed lock link.
 
 ## Historical boundary
 

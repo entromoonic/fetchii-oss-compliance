@@ -27,6 +27,15 @@ class CompliancePolicyTests(unittest.TestCase):
     version = "2026.03.17"
     commit = "a" * 40
     source_digest = "b" * 64
+    artifact_digest = "c" * 64
+    display_version = "1234abcd"
+
+    @property
+    def artifact_url(self) -> str:
+        return (
+            "https://downloads.beamdrop.entromoonic.com/fetchii-core/"
+            f"fetchii-core_macos_{self.version}.tar.gz"
+        )
 
     def core_lock(self) -> dict:
         return {
@@ -90,11 +99,10 @@ class CompliancePolicyTests(unittest.TestCase):
                 f"# fetchii-core {lock['version']} — corresponding-source record",
                 "",
                 "- **Schema:** `fetchii-core-record/v3`",
-                "- **Display version:** `1234abcd`",
+                f"- **Display version:** `{self.display_version}`",
                 (
                     "- **Artifact:** [immutable tarball]"
-                    "(https://downloads.beamdrop.entromoonic.com/fetchii-core/"
-                    f"{lock['version']}/fetchii-core.tar.gz) (`sha256: {'c' * 64}`)"
+                    f"({self.artifact_url}) (`sha256: {self.artifact_digest}`)"
                 ),
                 f"- **Input lock:** [`{lock_digest}`](locks/{lock['version']}.json)",
                 f"- **Source repository:** [{source['repository']}]({source['repository']})",
@@ -155,6 +163,15 @@ class CompliancePolicyTests(unittest.TestCase):
         record_path = lock_path.parent.parent / f"{self.version}.md"
         record_path.write_text(self.render_record(lock, digest), encoding="utf-8")
         return record_path, lock_path, digest
+
+    def validate_record(self, record: Path, *, root: Path) -> list[str]:
+        return check_compliance.validate_core_record(
+            record,
+            artifact_url=self.artifact_url,
+            artifact_sha256=self.artifact_digest,
+            display_version=self.display_version,
+            root=root,
+        )
 
     def test_index_is_byte_deterministic_and_current(self) -> None:
         first = generate_index.render()
@@ -262,7 +279,83 @@ class CompliancePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, _, _ = self.make_record_tree(root)
-            self.assertEqual(check_compliance.validate_core_record(record, root=root), [])
+            self.assertEqual(self.validate_record(record, root=root), [])
+            self.assertEqual(
+                check_compliance.validate_claimed_core_record(record, root=root), []
+            )
+
+    def test_core_record_full_byte_oracle_rejects_every_unlocked_field(self) -> None:
+        mutations = (
+            ("- **Display version:** `1234abcd`", "- **Display version:** `deadbeef`"),
+            (
+                "- **License:** the bundle includes `mutagen` under GPLv2-or-later; "
+                "see `../GPLv2.txt`.",
+                "- **License:** unknown",
+            ),
+            (
+                "- **Build recipe:** `python3 -m bundle.pyinstaller --onedir "
+                "--target-architecture universal2`.",
+                "- **Build recipe:** `pip install latest`.",
+            ),
+            (
+                "Reproduction must use the locked source object and every "
+                "dependency artifact below.",
+                "Reproduction may redownload dependencies.",
+            ),
+            (
+                "Do not resolve a tag, `latest` URL, package range, or "
+                "installed environment again.",
+                "Resolve the current environment again.",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before[:32]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    self.assertIn(before, contents)
+                    record.write_text(
+                        contents.replace(before, after, 1), encoding="utf-8"
+                    )
+                    self.assertTrue(self.validate_record(record, root=root))
+
+    def test_core_record_rejects_duplicate_or_conflicting_fields(self) -> None:
+        additions = (
+            "- **Display version:** `deadbeef`\n",
+            f"- **Artifact:** [immutable tarball]({self.artifact_url}) "
+            f"(`sha256: {'d' * 64}`)\n",
+            "- **License:** conflicting license claim\n",
+            "Reproduction may use `latest`.\n",
+        )
+        for addition in additions:
+            with self.subTest(addition=addition[:40]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    record.write_bytes(record.read_bytes() + addition.encode("utf-8"))
+                    self.assertTrue(
+                        check_compliance.validate_claimed_core_record(record, root=root)
+                    )
+
+    def test_core_record_rejects_latest_or_foreign_artifact_url(self) -> None:
+        for replacement in (
+            "https://downloads.beamdrop.entromoonic.com/fetchii-core/latest.tar.gz",
+            f"https://example.com/fetchii-core_macos_{self.version}.tar.gz",
+        ):
+            with self.subTest(replacement=replacement):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    record.write_text(
+                        contents.replace(self.artifact_url, replacement, 1),
+                        encoding="utf-8",
+                    )
+                    errors = check_compliance.validate_claimed_core_record(
+                        record, root=root
+                    )
+                    self.assertTrue(any("fixed immutable" in error for error in errors))
 
     def test_core_record_rejects_mutated_source_lock_or_dependency_claim(self) -> None:
         source_url = self.core_lock()["source"]["archiveUrl"]
@@ -281,8 +374,10 @@ class CompliancePolicyTests(unittest.TestCase):
                     record, _, _ = self.make_record_tree(root)
                     contents = record.read_text(encoding="utf-8")
                     self.assertIn(before, contents)
-                    record.write_text(contents.replace(before, after, 1), encoding="utf-8")
-                    self.assertTrue(check_compliance.validate_core_record(record, root=root))
+                    record.write_text(
+                        contents.replace(before, after, 1), encoding="utf-8"
+                    )
+                    self.assertTrue(self.validate_record(record, root=root))
 
     def test_core_record_rejects_lock_digest_and_filename_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -290,13 +385,44 @@ class CompliancePolicyTests(unittest.TestCase):
             record, _, digest = self.make_record_tree(root)
             contents = record.read_text(encoding="utf-8").replace(digest, "f" * 64, 1)
             record.write_text(contents, encoding="utf-8")
-            self.assertTrue(check_compliance.validate_core_record(record, root=root))
+            self.assertTrue(self.validate_record(record, root=root))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, _, _ = self.make_record_tree(root)
             wrong = record.with_name("2026.03.18.md")
             record.rename(wrong)
-            self.assertTrue(check_compliance.validate_core_record(wrong, root=root))
+            self.assertTrue(self.validate_record(wrong, root=root))
+
+    def test_core_record_rejects_noncanonical_lock_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            canonical = f"locks/{self.version}.json"
+            contents = record.read_text(encoding="utf-8")
+            self.assertIn(canonical, contents)
+            record.write_text(
+                contents.replace(canonical, f"locks/other-{self.version}.json", 1),
+                encoding="utf-8",
+            )
+            self.assertTrue(self.validate_record(record, root=root))
+
+    def test_nested_version_record_is_rejected_and_never_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for component in generate_index.COMPONENTS:
+                (root / component / "versions").mkdir(parents=True)
+            nested = root / "fetchii-core" / "versions" / "rogue" / "2026.03.17.md"
+            nested.parent.mkdir()
+            nested.write_text(
+                "# fetchii-core 2026.03.17 — corresponding-source record\n"
+                "- **Schema:** `fetchii-core-record/v3`\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("nested version paths are forbidden" in error for error in errors)
+            )
+            self.assertEqual(generate_index.records("fetchii-core", root=root), [])
 
     def test_generator_comment_alone_never_marks_record_locked(self) -> None:
         contents = (
