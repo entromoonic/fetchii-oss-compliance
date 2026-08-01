@@ -2,7 +2,7 @@
 # Fetchii redistributed-component record index
 
 This is a deterministic convenience index of per-component records.
-The component record and its locked inputs remain the primary evidence path;
+The component record and its canonical lock remain the primary evidence path;
 this page does not make a legal sufficiency claim or map app release numbers.
 
 ## aria2

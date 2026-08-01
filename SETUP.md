@@ -41,14 +41,20 @@ Do not paste ad-hoc shell snippets into workflows. Builder owns the reviewed gen
 and publisher. Every conforming production run must follow this order:
 
 1. Resolve an exact source revision and capture the build-stage source archive.
-2. Record the archive URL and SHA-256. Reproduction must use this object; it must not
-   resolve the upstream tag, `latest` URL, or package range again.
-3. Before installing dependencies, turn resolver reports into one canonical input lock.
-   The lock contains the full yt-dlp commit, exact mutagen version, every resolved
-   dependency version, and each source URL/SHA-256. The build installs only lock entries.
+2. Record the archive URL, SHA-256, and exact byte length. The immutable URL path is
+   derived from release version, source commit, and digest. Reproduction must use this
+   object; it must not resolve the upstream tag, `latest` URL, or package range again.
+3. Before installing dependencies, turn exactly six resolver reports (`runtime`,
+   `build`, `pyinstaller`, `repair`, `curl-arm64`, and `curl-x86-64`) into one canonical
+   v2 input lock. The lock contains the full yt-dlp tag and commit, exact CPython and
+   pip versions for the macOS/universal2 toolchain, exact mutagen version, every
+   resolved dependency version, and each immutable PyPI URL/SHA-256. The build installs
+   only lock entries.
 4. Render the record and evidence from that lock and the final artifact digest. The
    evidence, object metadata, and OSS record must contain the same lock digest.
-5. Stage only the immutable source/lock objects.
+5. Stage only the immutable source/lock objects. Record paths are fixed at
+   `aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
+   `fetchii-core/versions/locks/{version}.json` for the core lock.
 6. Publish the OSS record bundle with `publish_compliance.py`. It starts each retry from
    a fresh remote head, refuses conflicting immutable paths, regenerates the index, and
    uses a fast-forward-only push.
@@ -84,7 +90,8 @@ regenerating the index fails the policy check.
 
 ## Historical boundary
 
-`aria2/versions/1.37.0.md` and `ffmpeg/versions/8.0.md` predate the locked v2 schema and
+`aria2/versions/1.37.0.md` and `ffmpeg/versions/8.0.md` predate locked records and
 contain recipe placeholders. They remain labelled legacy in the index; they must not be
-used as templates or treated as proof of a captured digest. New records use
-digest-suffixed filenames so a legacy file is never silently overwritten.
+used as templates or treated as proof of a captured digest. New aria2 and core records
+use the fixed version paths above. An existing path with different bytes is
+release-blocking; publishers must never silently replace it.

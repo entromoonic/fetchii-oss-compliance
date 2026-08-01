@@ -25,17 +25,23 @@ def title(path: Path) -> str:
 
 
 def status(component: str, contents: str) -> str:
-    """Classify from required v2 fields, never from a generator comment alone."""
+    """Classify from required schema fields, never from a generator comment alone."""
     if "<SHA256" in contents or "auto-filled" in contents:
         return "legacy recipe; digest not recorded"
     digests = SHA_IN_RECORD.findall(contents)
     if component == "fetchii-core" and (
-        "`fetchii-core-record/v2`" in contents
+        "`fetchii-core-record/v3`" in contents
         and len(digests) >= 2
-        and re.search(r"Input lock:\*\* \[`[0-9a-f]{64}`\]", contents)
+        and re.search(
+            r"Input lock:\*\* \[`[0-9a-f]{64}`\]"
+            r"\(locks/[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.json\)",
+            contents,
+        )
+        and re.search(r"yt-dlp tag:\*\* `[0-9]{4}\.[0-9]{2}\.[0-9]{2}`", contents)
         and re.search(r"yt-dlp commit:\*\* \[`[0-9a-f]{40}`\]", contents)
+        and "## Locked dependencies" in contents
     ):
-        return "locked v2 record"
+        return "locked v3 record"
     if component == "aria2" and (
         "`aria2-record/v2`" in contents
         and len(digests) >= 2
@@ -65,7 +71,7 @@ def render() -> bytes:
         "# Fetchii redistributed-component record index",
         "",
         "This is a deterministic convenience index of per-component records.",
-        "The component record and its locked inputs remain the primary evidence path;",
+        "The component record and its canonical lock remain the primary evidence path;",
         "this page does not make a legal sufficiency claim or map app release numbers.",
         "",
     ]

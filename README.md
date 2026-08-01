@@ -3,10 +3,10 @@
 Fetchii, by **Entromoonic, Ltd.**, is a closed-source application, but it
 redistributes a few components licensed under the GNU **GPL / LGPL**. This repository
 exists to preserve the corresponding-source and build-input records associated with
-redistributed binaries. Generated v2 records bind an exact binary digest to a locked
-source object, source revision, and deterministic dependency lock. Older recipe-only
-entries are retained and explicitly labelled as legacy; their presence is not presented
-as proof that a missing historical digest was captured.
+redistributed binaries. Generated core v3 records bind an exact binary digest to a
+locked source object, source revision, exact toolchain, and deterministic dependency
+lock. Older recipe-only entries are retained and explicitly labelled as legacy; their
+presence is not presented as proof that a missing historical digest was captured.
 
 This repository is the public evidence and source-discovery location referenced from the
 app's **About → Acknowledgments** screen. Whether a particular distribution satisfies
@@ -37,12 +37,18 @@ Notes:
 ## How to find the source for *your* version
 
 The corresponding source must match the **exact binary received**. Generated records are
-kept under each component's `versions/` directory and include the binary SHA-256. A v2
-record points only to the source archive captured during the build and to its recorded
-SHA-256; it never asks a reviewer to rediscover provenance by resolving an upstream tag
-or `latest` URL again. fetchii-core records additionally carry the exact yt-dlp commit
-and a canonical lock containing the exact mutagen version, all resolved dependencies,
-source URLs, and source hashes.
+kept under each component's `versions/` directory and include the binary SHA-256. A
+generated record points only to the source archive captured during the build and to its
+recorded SHA-256 and byte length; it never asks a reviewer to rediscover provenance by
+resolving an upstream tag or `latest` URL again. fetchii-core v3 records additionally
+carry the exact yt-dlp tag and commit and a canonical v2 lock containing exact CPython
+and pip versions for a macOS/universal2 toolchain, every dependency resolved across all
+six build scopes, immutable PyPI artifact URLs, and source hashes.
+
+Immutable release paths are version-keyed rather than digest-suffixed:
+`aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
+`fetchii-core/versions/locks/{version}.json`. Reusing a version with different bytes is
+a conflict, not a new filename.
 
 The deterministic [`fetchii-releases.md`](fetchii-releases.md) page is a convenience
 index of component records. It is generated from the repository tree and checked in CI;
