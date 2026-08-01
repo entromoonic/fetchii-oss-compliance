@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 CALVER = re.compile(r"^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$")
+SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 DISPLAY_VERSION = re.compile(r"^[0-9a-f]{8}$")
 PYTHON_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -37,6 +38,7 @@ PACKAGE_VERSION = re.compile(
 )
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 CORE_RECORD_SCHEMA = "fetchii-core-record/v3"
+ARIA2_RECORD_SCHEMA = "aria2-record/v3"
 CORE_MANIFEST_SCHEMA_VERSION = 1
 CORE_SOURCE_REPOSITORY = "https://github.com/yt-dlp/yt-dlp.git"
 CORE_SOURCE_HOST = "downloads.beamdrop.entromoonic.com"
@@ -45,6 +47,17 @@ CORE_ARTIFACT_PREFIX = "/fetchii-core"
 POLICY_WORKFLOW = Path(".github/workflows/compliance-policy.yml")
 DEPENDENCY_HOST = "files.pythonhosted.org"
 MAX_SOURCE_ARCHIVE_BYTES = 1_000_000_000
+MAX_RECORD_BYTES = 1_000_000
+# These recipe-only records predate the locked-record policy. Pinning their exact
+# bytes preserves history without treating them as digest evidence or allowing a
+# newly added legacy record to bypass the v3 requirement.
+HISTORICAL_ARIA2_RECIPE_SHA256 = {
+    "1.37.0": "fbd8da733239fc314cb793c729addafc1c884f8e52938b686cbe2c9fafeded53",
+}
+HISTORICAL_CORE_RECIPE_SHA256 = {
+    "2026.06.09": "3abaeaf9522a4e53b975dfaab9109d1a8be52dd4749ece00efd03359ee0886ff",
+    "2026.07.04": "003839ecc4a1173aecda186f38e2d90a1ad892eef6afe41f35b89cc55029c71f",
+}
 REQUIRED_SCOPES = (
     "runtime",
     "build",
@@ -149,9 +162,7 @@ def _stable_regular_bytes(path: Path, *, label: str, max_bytes: int) -> bytes:
         os.close(descriptor)
 
 
-def _load_canonical_json(
-    path: Path, *, label: str = "lock"
-) -> tuple[object, bytes]:
+def _load_canonical_json(path: Path, *, label: str = "lock") -> tuple[object, bytes]:
     try:
         raw = _stable_regular_bytes(path, label=label, max_bytes=100_000_000)
         value = json.loads(
@@ -295,9 +306,7 @@ def load_validated_release_manifest(
             "hex characters"
         )
     artifact_sha256 = value.get("artifactSha256")
-    if not isinstance(artifact_sha256, str) or not SHA256.fullmatch(
-        artifact_sha256
-    ):
+    if not isinstance(artifact_sha256, str) or not SHA256.fullmatch(artifact_sha256):
         raise ComplianceError("core release manifest artifact SHA-256 is invalid")
     _require_immutable_core_artifact_url(
         value.get("artifactUrl"), version=expected_version
@@ -358,7 +367,10 @@ def load_validated_lock(path: Path) -> tuple[dict[str, object], bytes]:
     source_url = _require_https_url(source.get("archiveUrl"), label="source archive")
     expected_source_path = f"{CORE_SOURCE_PREFIX}/{version}/{commit}/{digest}.tar.gz"
     parsed_source = urlsplit(source_url)
-    if parsed_source.hostname != CORE_SOURCE_HOST or parsed_source.path != expected_source_path:
+    if (
+        parsed_source.hostname != CORE_SOURCE_HOST
+        or parsed_source.path != expected_source_path
+    ):
         raise ComplianceError(
             "core lock source URL is not bound to version, commit, and digest"
         )
@@ -402,12 +414,16 @@ def load_validated_lock(path: Path) -> tuple[dict[str, object], bytes]:
         name = dependency.get("name")
         canonical_name = _normalize_package_name(name)
         if name != canonical_name or canonical_name <= previous_name:
-            raise ComplianceError("core lock dependency names are not canonical and sorted")
+            raise ComplianceError(
+                "core lock dependency names are not canonical and sorted"
+            )
         previous_name = canonical_name
         _require_exact_version(dependency.get("version"), name=canonical_name)
         artifacts = dependency.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
-            raise ComplianceError(f"core lock dependency {canonical_name} has no artifact")
+            raise ComplianceError(
+                f"core lock dependency {canonical_name} has no artifact"
+            )
         dependency_scopes: set[str] = set()
         for artifact in artifacts:
             if not isinstance(artifact, dict) or set(artifact) != {
@@ -523,9 +539,7 @@ def render_core_record(
         )
     if not SHA256.fullmatch(artifact_sha256):
         raise ComplianceError("core artifact SHA-256 is invalid")
-    artifact_url = _require_immutable_core_artifact_url(
-        artifact_url, version=version
-    )
+    artifact_url = _require_immutable_core_artifact_url(artifact_url, version=version)
     lock_digest = hashlib.sha256(raw_lock).hexdigest()
     source = lock["source"]
     toolchain = lock["toolchain"]
@@ -690,9 +704,7 @@ def validate_core_record(
     )
 
 
-def validate_manifest_bound_core_record(
-    path: Path, *, root: Path = ROOT
-) -> list[str]:
+def validate_manifest_bound_core_record(path: Path, *, root: Path = ROOT) -> list[str]:
     """Validate a checked-in record only against its independent fixed manifest."""
 
     label = display_path(path, root=root)
@@ -756,7 +768,236 @@ def local_link_errors() -> list[str]:
                 )
                 continue
             if not destination.exists():
-                errors.append(f"{document.relative_to(ROOT)}: dead local link: {target}")
+                errors.append(
+                    f"{document.relative_to(ROOT)}: dead local link: {target}"
+                )
+    return errors
+
+
+ARIA2_EVIDENCE_KEYS = {
+    "schemaVersion",
+    "component",
+    "version",
+    "sourceRevision",
+    "sourceOriginUrl",
+    "sourceArchiveUrl",
+    "sourceArchiveSha256",
+    "artifactSha256",
+    "artifactUrl",
+    "recordSha256",
+}
+
+
+def aria2_release_urls(version: str) -> tuple[str, str, str]:
+    if not SEMVER.fullmatch(version):
+        raise ComplianceError("aria2 version must be an exact semantic version")
+    release_root = (
+        "https://github.com/entromoonic/fetchii-aria2-builder/"
+        f"releases/download/aria2-v{version}"
+    )
+    return (
+        "https://github.com/aria2/aria2/releases/download/"
+        f"release-{version}/aria2-{version}.tar.xz",
+        f"{release_root}/aria2.tar.xz",
+        f"{release_root}/aria2c-signed.zip",
+    )
+
+
+def render_aria2_record(
+    version: str,
+    source_sha256: str,
+    artifact_sha256: str,
+) -> bytes:
+    if not SHA256.fullmatch(source_sha256):
+        raise ComplianceError("aria2 source SHA-256 is invalid")
+    if not SHA256.fullmatch(artifact_sha256):
+        raise ComplianceError("aria2 artifact SHA-256 is invalid")
+    source_origin_url, source_archive_url, artifact_url = aria2_release_urls(version)
+    lines = [
+        "<!-- generated by release_records.py; deterministic; do not edit -->",
+        f"# aria2 {version} — corresponding-source record",
+        "",
+        f"- **Schema:** `{ARIA2_RECORD_SCHEMA}`",
+        (
+            "- **Artifact:** [signed universal binary]"
+            f"({artifact_url}) (`sha256: {artifact_sha256}`)"
+        ),
+        (
+            "- **Locked source object:** [carried release source archive]"
+            f"({source_archive_url}) (`sha256: {source_sha256}`)"
+        ),
+        (
+            "- **Source origin:** [canonical upstream release archive]"
+            f"({source_origin_url})"
+        ),
+        f"- **Source revision:** `release-{version}`",
+        "- **License:** GPLv2; see `../GPLv2.txt`.",
+        (
+            "- **Configure:** `--without-libxml2 --without-libexpat "
+            "--without-sqlite3 --without-libssh2 --without-libcares "
+            "--without-libnettle --without-libgmp --without-libgcrypt "
+            "--with-appletls`, once per architecture, then `lipo`."
+        ),
+        "",
+        (
+            "Reproduction must use the carried release source archive above "
+            "and verify its SHA-256."
+        ),
+        (
+            "The source-origin URL is provenance only; do not download it "
+            "again for reproduction."
+        ),
+        "",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _parse_aria2_v3_record(
+    raw: bytes,
+    *,
+    expected_version: str | None = None,
+) -> tuple[str, str, str]:
+    try:
+        contents = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ComplianceError("aria2 record is not UTF-8") from error
+    lines = contents.splitlines()
+    if len(lines) != 13 or not contents.endswith("\n") or "\r" in contents:
+        raise ComplianceError("aria2 record is not the deterministic v3 rendering")
+    title = re.fullmatch(
+        r"# aria2 ((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
+        r"(?:0|[1-9][0-9]*)) — corresponding-source record",
+        lines[1],
+    )
+    if title is None:
+        raise ComplianceError("aria2 record title has no exact semantic version")
+    version = title.group(1)
+    if expected_version is not None and version != expected_version:
+        raise ComplianceError("aria2 record and fixed-path versions differ")
+    source_origin_url, source_archive_url, artifact_url = aria2_release_urls(version)
+    artifact = re.fullmatch(
+        re.escape(
+            "- **Artifact:** [signed universal binary]" f"({artifact_url}) (`sha256: "
+        )
+        + r"([0-9a-f]{64})"
+        + re.escape("`)"),
+        lines[4],
+    )
+    source = re.fullmatch(
+        re.escape(
+            "- **Locked source object:** [carried release source archive]"
+            f"({source_archive_url}) (`sha256: "
+        )
+        + r"([0-9a-f]{64})"
+        + re.escape("`)"),
+        lines[5],
+    )
+    if artifact is None or source is None:
+        raise ComplianceError("aria2 record digest or release URL is invalid")
+    artifact_sha256 = artifact.group(1)
+    source_sha256 = source.group(1)
+    if raw != render_aria2_record(version, source_sha256, artifact_sha256):
+        raise ComplianceError("aria2 record is not the deterministic v3 rendering")
+    if contents.count(source_origin_url) != 1:
+        raise ComplianceError("aria2 source-origin URL role is not unique")
+    if contents.count(source_archive_url) != 1:
+        raise ComplianceError("aria2 carried-source URL role is not unique")
+    if contents.count(artifact_url) != 1:
+        raise ComplianceError("aria2 artifact URL role is not unique")
+    return version, source_sha256, artifact_sha256
+
+
+def validate_aria2_v3_record(
+    record: Path,
+    evidence_path: Path,
+    *,
+    root: Path = ROOT,
+) -> list[str]:
+    label = display_path(record, root=root)
+    try:
+        raw_record = _stable_regular_bytes(
+            record,
+            label="aria2 record",
+            max_bytes=MAX_RECORD_BYTES,
+        )
+        version, source_sha256, artifact_sha256 = _parse_aria2_v3_record(
+            raw_record,
+            expected_version=record.stem,
+        )
+        value, _raw_evidence = _load_canonical_json(
+            evidence_path,
+            label="aria2 release evidence",
+        )
+        if not isinstance(value, dict) or set(value) != ARIA2_EVIDENCE_KEYS:
+            raise ComplianceError("aria2 release evidence schema is incomplete")
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 3:
+            raise ComplianceError("unsupported aria2 release evidence schema")
+        if value.get("component") != "aria2" or value.get("version") != version:
+            raise ComplianceError("aria2 release evidence identity is inconsistent")
+        source_origin_url, source_archive_url, artifact_url = aria2_release_urls(
+            version
+        )
+        expected = {
+            "schemaVersion": 3,
+            "component": "aria2",
+            "version": version,
+            "sourceRevision": f"release-{version}",
+            "sourceOriginUrl": source_origin_url,
+            "sourceArchiveUrl": source_archive_url,
+            "sourceArchiveSha256": source_sha256,
+            "artifactSha256": artifact_sha256,
+            "artifactUrl": artifact_url,
+            "recordSha256": hashlib.sha256(raw_record).hexdigest(),
+        }
+        if value != expected:
+            raise ComplianceError(
+                "aria2 release evidence does not bind the exact record"
+            )
+    except ComplianceError as error:
+        return [f"{label}: {error}"]
+    return []
+
+
+def validate_historical_recipe(
+    record: Path,
+    *,
+    component: str,
+    expected_digests: dict[str, str],
+    root: Path = ROOT,
+) -> list[str]:
+    label = display_path(record, root=root)
+    expected = expected_digests.get(record.stem)
+    if expected is None:
+        return [f"{label}: new {component} records must use the locked v3 schema"]
+    try:
+        raw = _stable_regular_bytes(
+            record,
+            label=f"historical {component} recipe",
+            max_bytes=MAX_RECORD_BYTES,
+        )
+    except ComplianceError as error:
+        return [f"{label}: {error}"]
+    if hashlib.sha256(raw).hexdigest() != expected:
+        return [f"{label}: historical {component} recipe bytes changed"]
+    return []
+
+
+def historical_repository_errors(*, root: Path = ROOT) -> list[str]:
+    errors: list[str] = []
+    for component, digests in (
+        ("aria2", HISTORICAL_ARIA2_RECIPE_SHA256),
+        ("fetchii-core", HISTORICAL_CORE_RECIPE_SHA256),
+    ):
+        for version in sorted(digests):
+            record = root / component / "versions" / f"{version}.md"
+            errors.extend(
+                validate_historical_recipe(
+                    record,
+                    component=component,
+                    expected_digests=digests,
+                    root=root,
+                )
+            )
     return errors
 
 
@@ -771,6 +1012,13 @@ def record_status(component: str, contents: str) -> str:
         and "## Locked dependencies" in contents
     ):
         return "locked v3 record"
+    if component == "aria2":
+        try:
+            _parse_aria2_v3_record(contents.encode("utf-8"))
+        except ComplianceError:
+            pass
+        else:
+            return "locked v3 record"
     if component == "aria2" and (
         "`aria2-record/v2`" in contents
         and len(re.findall(r"sha256: ([0-9a-f]{64})", contents)) >= 2
@@ -814,10 +1062,11 @@ def _version_tree_errors(
             errors.append(f"{display_path(entry, root=root)}: cannot inspect: {error}")
             continue
         if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-            if component == "fetchii-core" and entry.name in {
-                "locks",
-                "manifests",
-            }:
+            allowed_directories = {
+                "fetchii-core": {"locks", "manifests"},
+                "aria2": {"evidence"},
+            }
+            if entry.name in allowed_directories.get(component, set()):
                 continue
             errors.append(
                 f"{display_path(entry, root=root)}: nested version paths are forbidden"
@@ -846,25 +1095,90 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
         )
 
     aria_directory = root / "aria2" / "versions"
+    locked_aria_versions: set[str] = set()
     for record in sorted(aria_directory.glob("*.md")):
         contents = record.read_text(encoding="utf-8")
-        if (
-            "`aria2-record/v2`" not in contents
-            and "generated by release_records.py" not in contents
-        ):
-            continue
-        if record_status("aria2", contents) != "locked v2 record":
-            errors.append(
-                f"{record.relative_to(root)}: v2 record evidence is incomplete"
+        if record_status("aria2", contents) == "locked v3 record":
+            locked_aria_versions.add(record.stem)
+            errors.extend(
+                validate_aria2_v3_record(
+                    record,
+                    aria_directory / "evidence" / f"{record.stem}.json",
+                    root=root,
+                )
+            )
+        else:
+            errors.extend(
+                validate_historical_recipe(
+                    record,
+                    component="aria2",
+                    expected_digests=HISTORICAL_ARIA2_RECIPE_SHA256,
+                    root=root,
+                )
             )
 
+    aria_evidence_directory = aria_directory / "evidence"
+    try:
+        aria_evidence_info = aria_evidence_directory.lstat()
+    except FileNotFoundError:
+        aria_evidence_info = None
+    except OSError as error:
+        errors.append(
+            f"{display_path(aria_evidence_directory, root=root)}: cannot inspect: {error}"
+        )
+        aria_evidence_info = None
+    if aria_evidence_info is not None:
+        if not stat.S_ISDIR(aria_evidence_info.st_mode) or stat.S_ISLNK(
+            aria_evidence_info.st_mode
+        ):
+            errors.append(
+                f"{display_path(aria_evidence_directory, root=root)}: "
+                "evidence path must be a real directory"
+            )
+        else:
+            for evidence in sorted(aria_evidence_directory.iterdir()):
+                try:
+                    evidence_info = evidence.lstat()
+                except OSError as error:
+                    errors.append(
+                        f"{display_path(evidence, root=root)}: cannot inspect: {error}"
+                    )
+                    continue
+                if (
+                    evidence.suffix != ".json"
+                    or not stat.S_ISREG(evidence_info.st_mode)
+                    or stat.S_ISLNK(evidence_info.st_mode)
+                    or evidence_info.st_nlink != 1
+                ):
+                    errors.append(
+                        f"{display_path(evidence, root=root)}: "
+                        "evidence directory contains an unexpected path"
+                    )
+                    continue
+                if evidence.stem not in locked_aria_versions:
+                    errors.append(
+                        f"{display_path(evidence, root=root)}: "
+                        "aria2 evidence has no locked v3 record"
+                    )
+
     core_directory = root / "fetchii-core" / "versions"
-    core_versions: set[str] = set()
+    locked_core_versions: set[str] = set()
     for record in sorted(core_directory.glob("*.md")):
         if record.name == "TEMPLATE.md":
             continue
-        errors.extend(validate_manifest_bound_core_record(record, root=root))
-        core_versions.add(record.stem)
+        contents = record.read_text(encoding="utf-8")
+        if record_status("fetchii-core", contents) == "locked v3 record":
+            locked_core_versions.add(record.stem)
+            errors.extend(validate_manifest_bound_core_record(record, root=root))
+        else:
+            errors.extend(
+                validate_historical_recipe(
+                    record,
+                    component="fetchii-core",
+                    expected_digests=HISTORICAL_CORE_RECIPE_SHA256,
+                    root=root,
+                )
+            )
     lock_directory = core_directory / "locks"
     try:
         lock_directory_info = lock_directory.lstat()
@@ -900,7 +1214,7 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
                 )
                 continue
             errors.extend(validate_lock(lock, root=root))
-            if lock.stem not in core_versions:
+            if lock.stem not in locked_core_versions:
                 errors.append(
                     f"{lock.relative_to(root)}: input lock has no fixed-path record"
                 )
@@ -942,7 +1256,7 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
                 )
                 continue
             errors.extend(validate_release_manifest(manifest, root=root))
-            if manifest.stem not in core_versions:
+            if manifest.stem not in locked_core_versions:
                 errors.append(
                     f"{manifest.relative_to(root)}: "
                     "release manifest has no fixed-path record"
@@ -963,10 +1277,12 @@ def _is_append_only_record_path(path: str) -> bool:
     if len(parts) == 4:
         component, versions, sidecar, filename = parts
         return (
-            component == "fetchii-core"
-            and versions == "versions"
-            and sidecar in {"locks", "manifests"}
+            versions == "versions"
             and filename.endswith(".json")
+            and (
+                (component == "fetchii-core" and sidecar in {"locks", "manifests"})
+                or (component == "aria2" and sidecar == "evidence")
+            )
         )
     return False
 
@@ -983,9 +1299,7 @@ def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
         raise ComplianceError(f"cannot execute local git: {error}") from error
 
 
-def append_only_history_errors(
-    base_commit: str, *, root: Path = ROOT
-) -> list[str]:
+def append_only_history_errors(base_commit: str, *, root: Path = ROOT) -> list[str]:
     """Compare protected current bytes with their immutable PR-base blobs."""
 
     if not isinstance(base_commit, str) or not COMMIT.fullmatch(base_commit):
@@ -1010,9 +1324,7 @@ def append_only_history_errors(
     if shallow.returncode != 0 or shallow.stdout.strip() != b"false":
         return ["append-only history requires a complete non-shallow checkout"]
 
-    base_exists = _run_git(
-        resolved_root, "cat-file", "-e", f"{base_commit}^{{commit}}"
-    )
+    base_exists = _run_git(resolved_root, "cat-file", "-e", f"{base_commit}^{{commit}}")
     if base_exists.returncode != 0:
         return ["append-only base commit is unavailable in local history"]
     ancestor = _run_git(
@@ -1115,14 +1427,11 @@ def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
         r"        run: python3 scripts/check_compliance\.py --append-only-base "
         r"\"\$FETCHII_POLICY_BASE\"$"
     )
-    if (
-        "on:\n  pull_request:\n" not in contents
-        or not append_only_pattern.search(contents)
+    if "on:\n  pull_request:\n" not in contents or not append_only_pattern.search(
+        contents
     ):
         errors.append(f"{label}: append-only PR-base gate is incomplete")
-    for action in re.findall(
-        r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", contents
-    ):
+    for action in re.findall(r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", contents):
         _, separator, revision = action.rpartition("@")
         if not separator or not re.fullmatch(r"[0-9a-f]{40}", revision):
             errors.append(f"{label}: action is not pinned to a full commit: {action}")
@@ -1144,6 +1453,7 @@ def main(argv: list[str] | None = None) -> int:
     if index.returncode:
         errors.append((index.stderr or index.stdout).strip())
     errors.extend(local_link_errors())
+    errors.extend(historical_repository_errors())
     errors.extend(generated_record_errors())
     errors.extend(workflow_policy_errors())
     if args.append_only_base is not None:

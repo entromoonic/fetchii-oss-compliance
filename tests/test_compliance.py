@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -221,16 +222,53 @@ class CompliancePolicyTests(unittest.TestCase):
         for component in ("aria2", "fetchii-core", "ffmpeg"):
             (root / component / "versions").mkdir(parents=True, exist_ok=True)
         lock = self.core_lock()
-        lock_path = root / "fetchii-core" / "versions" / "locks" / f"{self.version}.json"
+        lock_path = (
+            root / "fetchii-core" / "versions" / "locks" / f"{self.version}.json"
+        )
         raw = self.write_lock(lock_path, lock)
         digest = hashlib.sha256(raw).hexdigest()
         record_path = lock_path.parent.parent / f"{self.version}.md"
         record_path.write_text(self.render_record(lock, digest), encoding="utf-8")
-        manifest_path = (
-            record_path.parent / "manifests" / f"{self.version}.json"
-        )
+        manifest_path = record_path.parent / "manifests" / f"{self.version}.json"
         self.write_manifest(manifest_path, self.release_manifest(digest))
         return record_path, lock_path, digest
+
+    def make_aria2_record_tree(
+        self,
+        root: Path,
+        *,
+        version: str = "1.38.0",
+    ) -> tuple[Path, Path]:
+        for component in ("aria2", "fetchii-core", "ffmpeg"):
+            (root / component / "versions").mkdir(parents=True, exist_ok=True)
+        source_digest = "d" * 64
+        artifact_digest = "e" * 64
+        record_raw = check_compliance.render_aria2_record(
+            version,
+            source_digest,
+            artifact_digest,
+        )
+        record = root / "aria2" / "versions" / f"{version}.md"
+        record.write_bytes(record_raw)
+        origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
+            version
+        )
+        evidence = {
+            "schemaVersion": 3,
+            "component": "aria2",
+            "version": version,
+            "sourceRevision": f"release-{version}",
+            "sourceOriginUrl": origin_url,
+            "sourceArchiveUrl": archive_url,
+            "sourceArchiveSha256": source_digest,
+            "artifactSha256": artifact_digest,
+            "artifactUrl": artifact_url,
+            "recordSha256": hashlib.sha256(record_raw).hexdigest(),
+        }
+        evidence_path = root / "aria2" / "versions" / "evidence" / f"{version}.json"
+        evidence_path.parent.mkdir()
+        evidence_path.write_bytes(check_compliance.canonical_json_bytes(evidence))
+        return record, evidence_path
 
     def validate_record(self, record: Path, *, root: Path) -> list[str]:
         return check_compliance.validate_core_record(
@@ -258,6 +296,7 @@ class CompliancePolicyTests(unittest.TestCase):
     def make_append_only_repository(self, root: Path) -> str:
         protected = {
             "aria2/versions/1.37.0.md": b"aria record\n",
+            "aria2/versions/evidence/1.37.0.json": b"aria evidence\n",
             "fetchii-core/versions/2026.03.17.md": b"core record\n",
             "fetchii-core/versions/locks/2026.03.17.json": b"core lock\n",
             "fetchii-core/versions/manifests/2026.03.17.json": b"manifest\n",
@@ -331,7 +370,9 @@ class CompliancePolicyTests(unittest.TestCase):
     def test_repository_policy_main_passes(self) -> None:
         self.assertEqual(check_compliance.main([]), 0)
 
-    def test_workflow_policy_requires_tests_read_only_permissions_and_pins(self) -> None:
+    def test_workflow_policy_requires_tests_read_only_permissions_and_pins(
+        self,
+    ) -> None:
         self.assertEqual(check_compliance.workflow_policy_errors(), [])
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -365,6 +406,7 @@ class CompliancePolicyTests(unittest.TestCase):
             base = self.make_append_only_repository(root)
             additions = {
                 "aria2/versions/1.38.0.md": b"new aria record\n",
+                "aria2/versions/evidence/1.38.0.json": b"new aria evidence\n",
                 "fetchii-core/versions/2026.03.18.md": b"new core record\n",
                 "fetchii-core/versions/locks/2026.03.18.json": b"new lock\n",
                 "fetchii-core/versions/manifests/2026.03.18.json": b"new manifest\n",
@@ -378,18 +420,23 @@ class CompliancePolicyTests(unittest.TestCase):
                 check_compliance.append_only_history_errors(base, root=root), []
             )
 
-    def test_append_only_history_protects_ffmpeg_but_not_the_core_template(
+    def test_append_only_history_protects_aria_evidence_and_ffmpeg_but_not_template(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             base = self.make_append_only_repository(root)
             ffmpeg = root / "ffmpeg/versions/8.0.md"
+            aria_evidence = root / "aria2/versions/evidence/1.37.0.json"
             template = root / "fetchii-core/versions/TEMPLATE.md"
             ffmpeg.write_bytes(b"rewritten ffmpeg record\n")
+            aria_evidence.write_bytes(b"rewritten aria evidence\n")
             template.write_bytes(b"updated template for a future schema\n")
             errors = check_compliance.append_only_history_errors(base, root=root)
             self.assertTrue(any(str(ffmpeg.relative_to(root)) in e for e in errors))
+            self.assertTrue(
+                any(str(aria_evidence.relative_to(root)) in e for e in errors)
+            )
             self.assertFalse(any(str(template.relative_to(root)) in e for e in errors))
 
     def test_append_only_cli_rejects_ffmpeg_rewrite_and_delete(self) -> None:
@@ -410,9 +457,7 @@ class CompliancePolicyTests(unittest.TestCase):
                 self.git(root, "add", ".")
                 self.git(root, "commit", "-m", "base compliance tree")
                 base = (
-                    self.git(root, "rev-parse", "HEAD")
-                    .stdout.decode("ascii")
-                    .strip()
+                    self.git(root, "rev-parse", "HEAD").stdout.decode("ascii").strip()
                 )
                 record = root / "ffmpeg/versions/8.0.md"
                 if mutation == "rewrite":
@@ -456,9 +501,7 @@ class CompliancePolicyTests(unittest.TestCase):
             root = Path(temporary)
             base = self.make_append_only_repository(root)
             deleted = root / "aria2/versions/1.37.0.md"
-            rewritten_lock = (
-                root / "fetchii-core/versions/locks/2026.03.17.json"
-            )
+            rewritten_lock = root / "fetchii-core/versions/locks/2026.03.17.json"
             deleted.unlink()
             rewritten_lock.write_bytes(b"rewritten lock\n")
             errors = check_compliance.append_only_history_errors(base, root=root)
@@ -469,9 +512,7 @@ class CompliancePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             base = self.make_append_only_repository(root)
-            self.assertTrue(
-                check_compliance.append_only_history_errors("", root=root)
-            )
+            self.assertTrue(check_compliance.append_only_history_errors("", root=root))
             self.assertTrue(
                 check_compliance.append_only_history_errors("f" * 40, root=root)
             )
@@ -612,12 +653,237 @@ class CompliancePolicyTests(unittest.TestCase):
             record, _, _ = self.make_record_tree(root)
             self.assertEqual(self.validate_record(record, root=root), [])
             self.assertEqual(
-                check_compliance.validate_manifest_bound_core_record(
-                    record, root=root
+                check_compliance.validate_manifest_bound_core_record(record, root=root),
+                [],
+            )
+            self.assertEqual(check_compliance.generated_record_errors(root=root), [])
+
+    def test_aria2_v3_record_and_canonical_evidence_are_one_fixed_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            self.assertEqual(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
                 ),
                 [],
             )
             self.assertEqual(check_compliance.generated_record_errors(root=root), [])
+            contents = record.read_text(encoding="utf-8")
+            self.assertEqual(
+                check_compliance.record_status("aria2", contents),
+                "locked v3 record",
+            )
+            self.assertEqual(
+                generate_index.status("aria2", contents),
+                "locked v3 record",
+            )
+
+    def test_aria2_v3_rejects_role_schema_digest_and_byte_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            original = record.read_bytes()
+            origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
+                "1.38.0"
+            )
+            role_placeholder = b"https://invalid.local/role-placeholder"
+            roles_swapped = (
+                original.replace(origin_url.encode("utf-8"), role_placeholder, 1)
+                .replace(
+                    archive_url.encode("utf-8"),
+                    origin_url.encode("utf-8"),
+                    1,
+                )
+                .replace(role_placeholder, archive_url.encode("utf-8"), 1)
+            )
+            mutations = {
+                "old schema": original.replace(
+                    b"aria2-record/v3", b"aria2-record/v2", 1
+                ),
+                "origin as carried archive": original.replace(
+                    archive_url.encode("utf-8"), origin_url.encode("utf-8"), 1
+                ),
+                "carried archive as artifact": original.replace(
+                    artifact_url.encode("utf-8"), archive_url.encode("utf-8"), 1
+                ),
+                "origin and carried archive roles swapped": roles_swapped,
+                "uppercase digest": re.sub(
+                    rb"sha256: ([0-9a-f]{64})",
+                    lambda match: b"sha256: " + match.group(1).upper(),
+                    original,
+                    count=1,
+                ),
+                "extra byte": original + b"\n",
+                "CRLF": original.replace(b"\n", b"\r\n"),
+            }
+            for label, payload in mutations.items():
+                with self.subTest(label=label):
+                    record.write_bytes(payload)
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+            record.write_bytes(original)
+
+    def test_aria2_v3_rejects_missing_or_forged_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            original = json.loads(evidence.read_text(encoding="utf-8"))
+            mutations = {
+                "wrong record digest": {**original, "recordSha256": "0" * 64},
+                "wrong source digest": {
+                    **original,
+                    "sourceArchiveSha256": "1" * 64,
+                },
+                "wrong artifact URL": {
+                    **original,
+                    "artifactUrl": original["sourceArchiveUrl"],
+                },
+                "extra field": {**original, "unexpected": "value"},
+                "boolean schema": {**original, "schemaVersion": True},
+            }
+            for label, value in mutations.items():
+                with self.subTest(label=label):
+                    evidence.write_bytes(check_compliance.canonical_json_bytes(value))
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+            evidence.unlink()
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+            evidence.write_bytes(check_compliance.canonical_json_bytes(original))
+            orphan = evidence.with_name("1.39.0.json")
+            orphan.write_bytes(evidence.read_bytes())
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("evidence has no locked v3 record" in error for error in errors)
+            )
+
+    def test_aria2_v3_rejects_noncanonical_or_nonregular_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            canonical = evidence.read_bytes()
+            for label, payload in {
+                "CRLF": canonical.replace(b"\n", b"\r\n"),
+                "extra byte": canonical + b"\n",
+            }.items():
+                with self.subTest(label=label):
+                    evidence.write_bytes(payload)
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+
+            backing = evidence.with_name("backing.json")
+            backing.write_bytes(canonical)
+            evidence.unlink()
+            evidence.symlink_to(backing.name)
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+
+            evidence.unlink()
+            os.link(backing, evidence)
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+
+            evidence.unlink()
+            backing.unlink()
+            evidence.write_bytes(canonical)
+            nested = evidence.parent / "nested"
+            nested.mkdir()
+            self.assertTrue(
+                any(
+                    "evidence directory contains an unexpected path" in error
+                    for error in check_compliance.generated_record_errors(root=root)
+                )
+            )
+
+    def test_aria2_v3_record_filename_must_match_evidence_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            renamed = record.with_name("1.38.1.md")
+            record.rename(renamed)
+            errors = check_compliance.validate_aria2_v3_record(
+                renamed,
+                evidence,
+                root=root,
+            )
+            self.assertTrue(
+                any("fixed-path versions differ" in error for error in errors)
+            )
+
+    def test_only_exact_historical_aria2_and_core_recipes_are_accepted(self) -> None:
+        fixtures = (
+            ("aria2", "1.37.0"),
+            ("fetchii-core", "2026.06.09"),
+            ("fetchii-core", "2026.07.04"),
+        )
+        for component, version in fixtures:
+            with self.subTest(component=component, version=version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    for name in generate_index.COMPONENTS:
+                        (root / name / "versions").mkdir(parents=True)
+                    source = ROOT / component / "versions" / f"{version}.md"
+                    record = root / component / "versions" / f"{version}.md"
+                    shutil.copyfile(source, record)
+                    self.assertEqual(
+                        check_compliance.generated_record_errors(root=root), []
+                    )
+                    record.write_bytes(record.read_bytes() + b"\n")
+                    self.assertTrue(check_compliance.generated_record_errors(root=root))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in generate_index.COMPONENTS:
+                (root / name / "versions").mkdir(parents=True)
+            (root / "aria2" / "versions" / "1.38.0.md").write_text(
+                "# new manual aria2 recipe\n",
+                encoding="utf-8",
+            )
+            (root / "fetchii-core" / "versions" / "2026.08.01.md").write_text(
+                "# new manual core recipe\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertEqual(
+                sum("must use the locked v3 schema" in error for error in errors),
+                2,
+            )
+
+    def test_repository_pins_every_pre_policy_recipe_byte(self) -> None:
+        self.assertEqual(check_compliance.historical_repository_errors(), [])
 
     def test_core_record_full_byte_oracle_rejects_every_unlocked_field(self) -> None:
         mutations = (
@@ -752,15 +1018,11 @@ class CompliancePolicyTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     record, _, digest = self.make_record_tree(root)
-                    manifest_path = (
-                        record.parent / "manifests" / f"{self.version}.json"
-                    )
+                    manifest_path = record.parent / "manifests" / f"{self.version}.json"
                     manifest = self.release_manifest(digest)
                     manifest[field] = replacement
                     self.write_manifest(manifest_path, manifest)
-                    self.assertTrue(
-                        check_compliance.generated_record_errors(root=root)
-                    )
+                    self.assertTrue(check_compliance.generated_record_errors(root=root))
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -802,16 +1064,12 @@ class CompliancePolicyTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as temporary:
                     root = Path(temporary)
                     record, _, digest = self.make_record_tree(root)
-                    manifest_path = (
-                        record.parent / "manifests" / f"{self.version}.json"
-                    )
+                    manifest_path = record.parent / "manifests" / f"{self.version}.json"
                     manifest = self.release_manifest(digest)
                     manifest["schemaVersion"] = schema_version
                     self.write_manifest(manifest_path, manifest)
                     errors = check_compliance.generated_record_errors(root=root)
-                    self.assertTrue(
-                        any("unsupported" in error for error in errors)
-                    )
+                    self.assertTrue(any("unsupported" in error for error in errors))
 
     def test_generated_policy_rejects_boolean_or_float_lock_schema(self) -> None:
         for schema_version in (True, False, 2.0):
@@ -866,10 +1124,7 @@ class CompliancePolicyTests(unittest.TestCase):
                         record, root=root
                     )
                     self.assertTrue(
-                        any(
-                            "canonical lock-bound oracle" in error
-                            for error in errors
-                        )
+                        any("canonical lock-bound oracle" in error for error in errors)
                     )
 
     def test_record_renderer_rejects_invalid_independent_inputs(self) -> None:
@@ -889,9 +1144,7 @@ class CompliancePolicyTests(unittest.TestCase):
             with self.subTest(mutation=mutation):
                 arguments = defaults | mutation
                 with self.assertRaises(check_compliance.ComplianceError):
-                    check_compliance.render_core_record(
-                        lock, raw_lock, **arguments
-                    )
+                    check_compliance.render_core_record(lock, raw_lock, **arguments)
 
         lock["version"] = 1
         with self.assertRaises(check_compliance.ComplianceError):
@@ -1037,7 +1290,9 @@ class CompliancePolicyTests(unittest.TestCase):
             "<!-- generated by release_records.py; deterministic; do not edit -->\n"
             "# incomplete\n"
         )
-        self.assertEqual(generate_index.status("fetchii-core", contents), "legacy/manual record")
+        self.assertEqual(
+            generate_index.status("fetchii-core", contents), "legacy/manual record"
+        )
         self.assertEqual(
             check_compliance.record_status("fetchii-core", contents),
             "legacy/manual record",
@@ -1048,7 +1303,9 @@ class CompliancePolicyTests(unittest.TestCase):
             root = Path(temporary)
             record, _, _ = self.make_record_tree(root)
             contents = record.read_text(encoding="utf-8")
-            self.assertEqual(generate_index.status("fetchii-core", contents), "locked v3 record")
+            self.assertEqual(
+                generate_index.status("fetchii-core", contents), "locked v3 record"
+            )
             self.assertEqual(
                 check_compliance.record_status("fetchii-core", contents),
                 "locked v3 record",

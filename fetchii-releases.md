@@ -15,7 +15,8 @@ this page does not make a legal sufficiency claim or map app release numbers.
 
 | Record | Status |
 |---|---|
-| _No release record yet_ | — |
+| [fetchii-core 2026.06.09 (yt-dlp) — corresponding source](fetchii-core/versions/2026.06.09.md) | legacy/manual record |
+| [fetchii-core 2026.07.04 (yt-dlp) — corresponding source](fetchii-core/versions/2026.07.04.md) | legacy/manual record |
 
 ## ffmpeg
 

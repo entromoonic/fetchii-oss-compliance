@@ -44,21 +44,29 @@ and publisher. Every conforming production run must follow this order:
 2. Record the archive URL, SHA-256, and exact byte length. The immutable URL path is
    derived from release version, source commit, and digest. Reproduction must use this
    object; it must not resolve the upstream tag, `latest` URL, or package range again.
-3. Before installing dependencies, turn exactly six resolver reports (`runtime`,
-   `build`, `pyinstaller`, `repair`, `curl-arm64`, and `curl-x86-64`) into one canonical
-   v2 input lock. The lock contains the full yt-dlp tag and commit, exact CPython and
-   pip versions for the macOS/universal2 toolchain, exact mutagen version, every
-   resolved dependency version, and each immutable PyPI URL/SHA-256. The build installs
-   only lock entries.
-4. Render the record and evidence from that lock and the final artifact digest. The
-   core record's artifact URL is exactly
-   `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`.
-   Write a canonical release manifest at `fetchii-core/versions/manifests/{version}.json`
-   containing the independently captured display version, artifact URL, artifact
-   SHA-256, and input-lock SHA-256. The evidence, object metadata, manifest, and OSS
-   record must contain the same lock digest.
+3. For fetchii-core, before installing dependencies, turn exactly six resolver reports
+   (`runtime`, `build`, `pyinstaller`, `repair`, `curl-arm64`, and `curl-x86-64`) into
+   one canonical v2 input lock. The lock contains the full yt-dlp tag and commit, exact
+   CPython and pip versions for the macOS/universal2 toolchain, exact mutagen version,
+   every resolved dependency version, and each immutable PyPI URL/SHA-256. The build
+   installs only lock entries.
+4. Bind release claims according to the component:
+   - aria2 uses deterministic `aria2-record/v3`. Builder hashes stable snapshots of the
+     carried source archive and signed artifact, renders the record from those hashes,
+     and writes canonical evidence binding that exact record SHA-256, both payload
+     SHA-256 values, the release version, and the three fixed URL roles. aria2 evidence
+     has no core input-lock field.
+   - fetchii-core renders its record from the canonical input lock and final artifact
+     digest. Its artifact URL is exactly
+     `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`.
+     Write a canonical release manifest at
+     `fetchii-core/versions/manifests/{version}.json` containing the independently
+     captured display version, artifact URL, artifact SHA-256, and input-lock SHA-256.
+     The core object metadata, manifest, and OSS record must contain the same lock
+     digest.
 5. Stage only the immutable source/lock objects. Record paths are fixed at
-   `aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
+   `aria2/versions/{version}.md`, `aria2/versions/evidence/{version}.json`,
+   `fetchii-core/versions/{version}.md`, and
    `fetchii-core/versions/locks/{version}.json` for the core lock, plus
    `fetchii-core/versions/manifests/{version}.json` for the independent release claims.
    Do not add other nested version-record directories; repository policy rejects them
@@ -66,7 +74,8 @@ and publisher. Every conforming production run must follow this order:
    Pull requests fetch complete local history and run the append-only checker against
    the event's exact base commit. Any changed or deleted existing record/lock/manifest,
    missing base commit, shallow history, or unrelated base fails closed; only new fixed
-   paths are accepted.
+   paths are accepted. Existing aria2 evidence receives the same protection as records,
+   core locks, and core manifests.
 6. Publish the OSS record bundle with `publish_compliance.py`. It starts each retry from
    a fresh remote head, refuses conflicting immutable paths, regenerates the index, and
    uses a fast-forward-only push.
@@ -106,8 +115,10 @@ only from the canonical fixed-path manifest, never by parsing the record under t
 
 ## Historical boundary
 
-`aria2/versions/1.37.0.md` and `ffmpeg/versions/8.0.md` predate locked records and
-contain recipe placeholders. They remain labelled legacy in the index; they must not be
-used as templates or treated as proof of a captured digest. New aria2 and core records
-use the fixed version paths above. An existing path with different bytes is
-release-blocking; publishers must never silently replace it.
+`aria2/versions/1.37.0.md`, `fetchii-core/versions/2026.06.09.md`,
+`fetchii-core/versions/2026.07.04.md`, and `ffmpeg/versions/8.0.md` predate locked
+records and contain recipe-only or placeholder evidence. They remain labelled legacy
+in the index and are not proof of a captured digest. The exact historical aria2/core
+bytes are pinned; another legacy aria2/core path is rejected. New aria2 and core
+records must use v3. An existing path with different bytes is release-blocking;
+publishers must never silently replace it.
