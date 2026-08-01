@@ -43,15 +43,21 @@ recorded SHA-256 and byte length; it never asks a reviewer to rediscover provena
 resolving an upstream tag or `latest` URL again. fetchii-core v3 records additionally
 carry the exact yt-dlp tag and commit and a canonical v2 lock containing exact CPython
 and pip versions for a macOS/universal2 toolchain, every dependency resolved across all
-six build scopes, immutable PyPI artifact URLs, and source hashes.
+six build scopes, immutable PyPI artifact URLs, and source hashes. An independent
+canonical release manifest supplies the expected display version, artifact URL and
+artifact SHA-256; record policy never accepts those claims merely because the record
+asserts them itself.
 
 Immutable release paths are version-keyed rather than digest-suffixed:
 `aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
-`fetchii-core/versions/locks/{version}.json`. Reusing a version with different bytes is
-a conflict, not a new filename. Core records accept only the matching artifact URL
+`fetchii-core/versions/locks/{version}.json`. Each core record also requires the fixed
+sidecar `fetchii-core/versions/manifests/{version}.json`, whose canonical bytes bind to
+the corresponding input-lock digest. Reusing a version with different bytes is a
+conflict, not a new filename. Core records accept only the matching artifact URL
 `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`;
 `latest`, a foreign host, or another path is invalid. Version records are top-level
-files; nested record directories are rejected and never indexed.
+files; nested record directories other than the fixed `locks/` and `manifests/`
+sidecars are rejected and never indexed.
 
 The deterministic [`fetchii-releases.md`](fetchii-releases.md) page is a convenience
 index of component records. It is generated from the repository tree and checked in CI;

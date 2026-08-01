@@ -36,6 +36,7 @@ PACKAGE_VERSION = re.compile(
 )
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 CORE_RECORD_SCHEMA = "fetchii-core-record/v3"
+CORE_MANIFEST_SCHEMA_VERSION = 1
 CORE_SOURCE_REPOSITORY = "https://github.com/yt-dlp/yt-dlp.git"
 CORE_SOURCE_HOST = "downloads.beamdrop.entromoonic.com"
 CORE_SOURCE_PREFIX = "/fetchii-core/sources"
@@ -54,15 +55,6 @@ SCOPE_INDEX = {scope: index for index, scope in enumerate(REQUIRED_SCOPES)}
 CORE_LOCK_LINK = re.compile(
     r"^- \*\*Input lock:\*\* \[`([0-9a-f]{64})`\]"
     r"\((locks/([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.json)\)$",
-    re.MULTILINE,
-)
-CORE_ARTIFACT = re.compile(
-    r"^- \*\*Artifact:\*\* \[immutable tarball\]\((https://[^)]+)\) "
-    r"\(`sha256: ([0-9a-f]{64})`\)$",
-    re.MULTILINE,
-)
-CORE_DISPLAY_VERSION = re.compile(
-    r"^- \*\*Display version:\*\* `([0-9a-f]{8})`$",
     re.MULTILINE,
 )
 
@@ -155,9 +147,11 @@ def _stable_regular_bytes(path: Path, *, label: str, max_bytes: int) -> bytes:
         os.close(descriptor)
 
 
-def _load_canonical_json(path: Path) -> tuple[object, bytes]:
+def _load_canonical_json(
+    path: Path, *, label: str = "lock"
+) -> tuple[object, bytes]:
     try:
-        raw = _stable_regular_bytes(path, label="lock", max_bytes=100_000_000)
+        raw = _stable_regular_bytes(path, label=label, max_bytes=100_000_000)
         value = json.loads(
             raw.decode("utf-8"),
             object_pairs_hook=_strict_object,
@@ -166,9 +160,9 @@ def _load_canonical_json(path: Path) -> tuple[object, bytes]:
     except ComplianceError:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ComplianceError("invalid lock JSON") from error
+        raise ComplianceError(f"invalid {label} JSON") from error
     if raw != canonical_json_bytes(value):
-        raise ComplianceError("lock bytes are not canonical")
+        raise ComplianceError(f"{label} bytes are not canonical")
     return value, raw
 
 
@@ -257,6 +251,57 @@ def _require_immutable_core_artifact_url(value: object, *, version: str) -> str:
             "core artifact URL must be the fixed immutable Fetchii version key"
         )
     return url
+
+
+def load_validated_release_manifest(
+    path: Path,
+    *,
+    expected_version: str,
+    raw_lock: bytes,
+) -> tuple[dict[str, object], bytes]:
+    """Load the independent immutable claims used to validate a core record."""
+
+    value, raw = _load_canonical_json(path, label="release manifest")
+    if not isinstance(value, dict) or set(value) != {
+        "schemaVersion",
+        "component",
+        "version",
+        "displayVersion",
+        "artifactUrl",
+        "artifactSha256",
+        "inputLockSha256",
+    }:
+        raise ComplianceError("unexpected core release manifest fields")
+    if (
+        value.get("schemaVersion") != CORE_MANIFEST_SCHEMA_VERSION
+        or value.get("component") != "fetchii-core"
+    ):
+        raise ComplianceError("unsupported core release manifest schema")
+    version = _require_calver(
+        value.get("version"), label="core release manifest version"
+    )
+    if version != expected_version:
+        raise ComplianceError("core release manifest version does not match its path")
+    display_version = value.get("displayVersion")
+    if not isinstance(display_version, str) or not DISPLAY_VERSION.fullmatch(
+        display_version
+    ):
+        raise ComplianceError(
+            "core release manifest display version must be eight lowercase "
+            "hex characters"
+        )
+    artifact_sha256 = value.get("artifactSha256")
+    if not isinstance(artifact_sha256, str) or not SHA256.fullmatch(
+        artifact_sha256
+    ):
+        raise ComplianceError("core release manifest artifact SHA-256 is invalid")
+    _require_immutable_core_artifact_url(
+        value.get("artifactUrl"), version=expected_version
+    )
+    expected_lock_digest = hashlib.sha256(raw_lock).hexdigest()
+    if value.get("inputLockSha256") != expected_lock_digest:
+        raise ComplianceError("core release manifest input lock digest mismatch")
+    return value, raw
 
 
 def load_validated_lock(path: Path) -> tuple[dict[str, object], bytes]:
@@ -532,30 +577,14 @@ def render_core_record(
     return "\n".join(lines).encode("utf-8")
 
 
-def core_record_claims(raw: bytes) -> tuple[str, str, str]:
-    """Extract the three release-specific inputs before applying the byte oracle."""
-
-    try:
-        contents = raw.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ComplianceError("record is not valid UTF-8") from error
-    displays = CORE_DISPLAY_VERSION.findall(contents)
-    artifacts = CORE_ARTIFACT.findall(contents)
-    if len(displays) != 1:
-        raise ComplianceError("display version is missing or duplicated")
-    if len(artifacts) != 1:
-        raise ComplianceError("artifact URL or digest is missing or duplicated")
-    artifact_url, artifact_sha256 = artifacts[0]
-    return displays[0], artifact_url, artifact_sha256
-
-
 def _validate_core_record_bytes(
     path: Path,
     raw: bytes,
     *,
-    artifact_url: str,
-    artifact_sha256: str,
-    display_version: str,
+    artifact_url: str | None = None,
+    artifact_sha256: str | None = None,
+    display_version: str | None = None,
+    manifest_path: Path | None = None,
     root: Path,
 ) -> list[str]:
     label = display_path(path, root=root)
@@ -585,6 +614,33 @@ def _validate_core_record_bytes(
         return [f"{label}: input lock is invalid: {error}"]
     if lock["version"] != version:
         return [f"{label}: record and input lock versions differ"]
+    if manifest_path is not None:
+        expected_manifest = path.parent / "manifests" / f"{version}.json"
+        try:
+            if manifest_path.resolve(strict=True) != expected_manifest.resolve(
+                strict=True
+            ):
+                return [
+                    f"{label}: release manifest does not use its fixed version path"
+                ]
+            manifest, _ = load_validated_release_manifest(
+                manifest_path,
+                expected_version=version,
+                raw_lock=raw_lock,
+            )
+        except (OSError, ComplianceError) as error:
+            return [f"{label}: release manifest is invalid: {error}"]
+        artifact_url = manifest["artifactUrl"]
+        artifact_sha256 = manifest["artifactSha256"]
+        display_version = manifest["displayVersion"]
+    if not all(
+        isinstance(value, str)
+        for value in (artifact_url, artifact_sha256, display_version)
+    ):
+        return [f"{label}: independent release claims are missing"]
+    assert isinstance(artifact_url, str)
+    assert isinstance(artifact_sha256, str)
+    assert isinstance(display_version, str)
     try:
         expected = render_core_record(
             lock,
@@ -625,23 +681,49 @@ def validate_core_record(
     )
 
 
-def validate_claimed_core_record(path: Path, *, root: Path = ROOT) -> list[str]:
-    """Validate a checked-in record after strictly extracting its canonical claims."""
+def validate_manifest_bound_core_record(
+    path: Path, *, root: Path = ROOT
+) -> list[str]:
+    """Validate a checked-in record only against its independent fixed manifest."""
 
     label = display_path(path, root=root)
     try:
         raw = _stable_regular_bytes(path, label="record", max_bytes=10_000_000)
-        display_version, artifact_url, artifact_sha256 = core_record_claims(raw)
     except ComplianceError as error:
         return [f"{label}: {error}"]
     return _validate_core_record_bytes(
         path,
         raw,
-        artifact_url=artifact_url,
-        artifact_sha256=artifact_sha256,
-        display_version=display_version,
+        manifest_path=path.parent / "manifests" / f"{path.stem}.json",
         root=root,
     )
+
+
+def validate_release_manifest(path: Path, *, root: Path = ROOT) -> list[str]:
+    label = display_path(path, root=root)
+    try:
+        manifests_directory = (
+            root / "fetchii-core" / "versions" / "manifests"
+        ).resolve(strict=True)
+        resolved_path = path.resolve(strict=True)
+    except OSError as error:
+        return [f"{label}: cannot resolve release manifest: {error}"]
+    if resolved_path.parent != manifests_directory or path.suffix != ".json":
+        return [f"{label}: release manifest must use the fixed version path"]
+    version = path.stem
+    try:
+        _require_calver(version, label="core release manifest version")
+        _, raw_lock = load_validated_lock(
+            root / "fetchii-core" / "versions" / "locks" / f"{version}.json"
+        )
+        load_validated_release_manifest(
+            path,
+            expected_version=version,
+            raw_lock=raw_lock,
+        )
+    except ComplianceError as error:
+        return [f"{label}: {error}"]
+    return []
 
 
 def local_link_errors() -> list[str]:
@@ -723,7 +805,10 @@ def _version_tree_errors(
             errors.append(f"{display_path(entry, root=root)}: cannot inspect: {error}")
             continue
         if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
-            if component == "fetchii-core" and entry.name == "locks":
+            if component == "fetchii-core" and entry.name in {
+                "locks",
+                "manifests",
+            }:
                 continue
             errors.append(
                 f"{display_path(entry, root=root)}: nested version paths are forbidden"
@@ -769,7 +854,7 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
     for record in sorted(core_directory.glob("*.md")):
         if record.name == "TEMPLATE.md":
             continue
-        errors.extend(validate_claimed_core_record(record, root=root))
+        errors.extend(validate_manifest_bound_core_record(record, root=root))
         core_versions.add(record.stem)
     lock_directory = core_directory / "locks"
     try:
@@ -809,6 +894,49 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
             if lock.stem not in core_versions:
                 errors.append(
                     f"{lock.relative_to(root)}: input lock has no fixed-path record"
+                )
+
+    manifest_directory = core_directory / "manifests"
+    try:
+        manifest_directory_info = manifest_directory.lstat()
+    except FileNotFoundError:
+        manifest_directory_info = None
+    except OSError as error:
+        errors.append(
+            f"{manifest_directory.relative_to(root)}: cannot inspect: {error}"
+        )
+        manifest_directory_info = None
+    if manifest_directory_info is not None:
+        if not stat.S_ISDIR(manifest_directory_info.st_mode) or stat.S_ISLNK(
+            manifest_directory_info.st_mode
+        ):
+            errors.append(
+                f"{manifest_directory.relative_to(root)}: "
+                "manifests path must be a real directory"
+            )
+            return errors
+        for manifest in sorted(manifest_directory.iterdir()):
+            try:
+                manifest_info = manifest.lstat()
+            except OSError as error:
+                errors.append(f"{manifest.relative_to(root)}: cannot inspect: {error}")
+                continue
+            if (
+                manifest.suffix != ".json"
+                or not stat.S_ISREG(manifest_info.st_mode)
+                or stat.S_ISLNK(manifest_info.st_mode)
+                or manifest_info.st_nlink != 1
+            ):
+                errors.append(
+                    f"{manifest.relative_to(root)}: "
+                    "manifests directory contains an unexpected path"
+                )
+                continue
+            errors.extend(validate_release_manifest(manifest, root=root))
+            if manifest.stem not in core_versions:
+                errors.append(
+                    f"{manifest.relative_to(root)}: "
+                    "release manifest has no fixed-path record"
                 )
     return errors
 
