@@ -957,7 +957,8 @@ def _is_append_only_record_path(path: str) -> bool:
         return (
             versions == "versions"
             and filename.endswith(".md")
-            and component in {"aria2", "fetchii-core"}
+            and filename != "TEMPLATE.md"
+            and component in {"aria2", "fetchii-core", "ffmpeg"}
         )
     if len(parts) == 4:
         component, versions, sidecar, filename = parts
@@ -1030,6 +1031,7 @@ def append_only_history_errors(
         "--",
         "aria2/versions",
         "fetchii-core/versions",
+        "ffmpeg/versions",
     )
     if tree.returncode != 0:
         return ["append-only base tree cannot be enumerated"]

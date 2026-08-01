@@ -6,7 +6,9 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -259,6 +261,8 @@ class CompliancePolicyTests(unittest.TestCase):
             "fetchii-core/versions/2026.03.17.md": b"core record\n",
             "fetchii-core/versions/locks/2026.03.17.json": b"core lock\n",
             "fetchii-core/versions/manifests/2026.03.17.json": b"manifest\n",
+            "ffmpeg/versions/8.0.md": b"ffmpeg record\n",
+            "fetchii-core/versions/TEMPLATE.md": b"editable template\n",
         }
         for relative, payload in protected.items():
             path = root / relative
@@ -364,6 +368,7 @@ class CompliancePolicyTests(unittest.TestCase):
                 "fetchii-core/versions/2026.03.18.md": b"new core record\n",
                 "fetchii-core/versions/locks/2026.03.18.json": b"new lock\n",
                 "fetchii-core/versions/manifests/2026.03.18.json": b"new manifest\n",
+                "ffmpeg/versions/8.1.md": b"new ffmpeg record\n",
             }
             for relative, payload in additions.items():
                 path = root / relative
@@ -372,6 +377,63 @@ class CompliancePolicyTests(unittest.TestCase):
             self.assertEqual(
                 check_compliance.append_only_history_errors(base, root=root), []
             )
+
+    def test_append_only_history_protects_ffmpeg_but_not_the_core_template(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            ffmpeg = root / "ffmpeg/versions/8.0.md"
+            template = root / "fetchii-core/versions/TEMPLATE.md"
+            ffmpeg.write_bytes(b"rewritten ffmpeg record\n")
+            template.write_bytes(b"updated template for a future schema\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any(str(ffmpeg.relative_to(root)) in e for e in errors))
+            self.assertFalse(any(str(template.relative_to(root)) in e for e in errors))
+
+    def test_append_only_cli_rejects_ffmpeg_rewrite_and_delete(self) -> None:
+        for mutation in ("rewrite", "delete"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary) / "repository"
+                shutil.copytree(
+                    ROOT,
+                    root,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".coverage"),
+                )
+                self.git(root, "init", "-b", "main")
+                self.git(root, "config", "user.name", "Compliance Test")
+                self.git(root, "config", "user.email", "compliance@example.invalid")
+                self.git(root, "add", ".")
+                self.git(root, "commit", "-m", "base compliance tree")
+                base = (
+                    self.git(root, "rev-parse", "HEAD")
+                    .stdout.decode("ascii")
+                    .strip()
+                )
+                record = root / "ffmpeg/versions/8.0.md"
+                if mutation == "rewrite":
+                    record.write_bytes(record.read_bytes() + b"rewritten\n")
+                else:
+                    record.unlink()
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "scripts/check_compliance.py",
+                        "--append-only-base",
+                        base,
+                    ],
+                    cwd=root,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"ffmpeg/versions/8.0.md", result.stderr)
 
     def test_append_only_history_rejects_coordinated_record_manifest_rewrite(
         self,
