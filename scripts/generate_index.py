@@ -114,7 +114,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    expected = render()
+    expected = render(root=ROOT)
     if args.check:
         try:
             actual = OUTPUT.read_bytes()

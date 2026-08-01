@@ -19,3 +19,6 @@ jobs:
 
       - name: Verify deterministic index, schemas, and local links
         run: python3 scripts/check_compliance.py
+
+      - name: Run complete compliance policy unit suite
+        run: python3 -m unittest discover -s tests -v

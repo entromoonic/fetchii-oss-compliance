@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -240,11 +244,81 @@ class CompliancePolicyTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual((ROOT / "fetchii-releases.md").read_bytes(), first)
 
+    def test_index_cli_check_write_and_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for component in generate_index.COMPONENTS:
+                (root / component / "versions").mkdir(parents=True)
+            output = root / "fetchii-releases.md"
+            expected = generate_index.render(root=root)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(generate_index, "ROOT", root),
+                mock.patch.object(generate_index, "OUTPUT", output),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                with mock.patch.object(
+                    generate_index.sys, "argv", ["generate_index.py", "--check"]
+                ):
+                    self.assertEqual(generate_index.main(), 1)
+                    output.write_bytes(b"stale\n")
+                    self.assertEqual(generate_index.main(), 1)
+                    output.write_bytes(expected)
+                    self.assertEqual(generate_index.main(), 0)
+                with mock.patch.object(
+                    generate_index.sys, "argv", ["generate_index.py"]
+                ):
+                    output.write_bytes(b"stale again\n")
+                    self.assertEqual(generate_index.main(), 0)
+                    self.assertEqual(output.read_bytes(), expected)
+
+    def test_index_title_and_aria_status_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "record.md"
+            path.write_text("no markdown title\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                generate_index.title(path)
+        aria = (
+            "- **Schema:** `aria2-record/v2`\n"
+            f"- **Artifact:** `sha256: {'a' * 64}`\n"
+            f"- **Source:** `sha256: {'b' * 64}`\n"
+            "- **Source revision:** `release-1.37.0`\n"
+        )
+        self.assertEqual(generate_index.status("aria2", aria), "locked v2 record")
+
     def test_repository_has_no_dead_local_markdown_links(self) -> None:
         self.assertEqual(check_compliance.local_link_errors(), [])
 
     def test_repository_policy_main_passes(self) -> None:
         self.assertEqual(check_compliance.main(), 0)
+
+    def test_workflow_policy_requires_tests_read_only_permissions_and_pins(self) -> None:
+        self.assertEqual(check_compliance.workflow_policy_errors(), [])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / check_compliance.POLICY_WORKFLOW
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "permissions:\n  contents: write\n\njobs:\n"
+                "  test:\n    steps:\n      - uses: actions/checkout@v4\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.workflow_policy_errors(root=root)
+            self.assertTrue(any("read-only" in error for error in errors))
+            self.assertTrue(any("unittest" in error for error in errors))
+            self.assertTrue(any("full commit" in error for error in errors))
+        with tempfile.TemporaryDirectory() as temporary:
+            errors = check_compliance.workflow_policy_errors(root=Path(temporary))
+            self.assertTrue(any("cannot safely open" in error for error in errors))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / check_compliance.POLICY_WORKFLOW
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"\xff")
+            errors = check_compliance.workflow_policy_errors(root=root)
+            self.assertTrue(any("invalid UTF-8" in error for error in errors))
 
     def test_core_lock_v2_accepts_exact_source_toolchain_and_six_scopes(self) -> None:
         self.assertEqual(self.validate_value(self.core_lock()), [])
@@ -529,6 +603,23 @@ class CompliancePolicyTests(unittest.TestCase):
             errors = check_compliance.generated_record_errors(root=root)
             self.assertTrue(any("duplicate" in error for error in errors))
 
+    def test_generated_policy_rejects_boolean_or_float_manifest_schema(self) -> None:
+        for schema_version in (True, 1.0):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, digest = self.make_record_tree(root)
+                    manifest_path = (
+                        record.parent / "manifests" / f"{self.version}.json"
+                    )
+                    manifest = self.release_manifest(digest)
+                    manifest["schemaVersion"] = schema_version
+                    self.write_manifest(manifest_path, manifest)
+                    errors = check_compliance.generated_record_errors(root=root)
+                    self.assertTrue(
+                        any("unsupported" in error for error in errors)
+                    )
+
     def test_generated_policy_requires_independent_release_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -541,25 +632,38 @@ class CompliancePolicyTests(unittest.TestCase):
             )
 
     def test_core_record_oracle_rejects_missing_dependency_scope(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            record, _, _ = self.make_record_tree(root)
-            repair_claim = (
-                "<br>`repair` "
-                "[sha256:"
-                "0000000000000000000000000000000000000000000000000000000000000004]"
-                "(https://files.pythonhosted.org/packages/aa/repair/"
-                "mutagen-1.47.0.tar.gz)"
-            )
-            contents = record.read_text(encoding="utf-8")
-            self.assertIn(repair_claim, contents)
-            record.write_text(contents.replace(repair_claim, "", 1), encoding="utf-8")
-            errors = check_compliance.validate_manifest_bound_core_record(
-                record, root=root
-            )
-            self.assertTrue(
-                any("canonical lock-bound oracle" in error for error in errors)
-            )
+        scopes = (
+            "runtime",
+            "build",
+            "pyinstaller",
+            "repair",
+            "curl-arm64",
+            "curl-x86-64",
+        )
+        for scope in scopes:
+            with self.subTest(scope=scope):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    start = contents.index(f"`{scope}` [sha256:")
+                    separator = contents.find("<br>", start)
+                    if separator >= 0:
+                        end = separator + len("<br>")
+                    else:
+                        end = contents.index(" |", start)
+                    record.write_text(
+                        contents[:start] + contents[end:], encoding="utf-8"
+                    )
+                    errors = check_compliance.validate_manifest_bound_core_record(
+                        record, root=root
+                    )
+                    self.assertTrue(
+                        any(
+                            "canonical lock-bound oracle" in error
+                            for error in errors
+                        )
+                    )
 
     def test_record_renderer_rejects_invalid_independent_inputs(self) -> None:
         lock = self.core_lock()
@@ -622,6 +726,34 @@ class CompliancePolicyTests(unittest.TestCase):
                     )
                     (base / name).write_text("unexpected\n", encoding="utf-8")
                     self.assertTrue(check_compliance.generated_record_errors(root=root))
+
+    def test_policy_rejects_nested_linked_or_hardlinked_sidecars(self) -> None:
+        for directory in ("locks", "manifests"):
+            for kind in ("nested", "symlink", "hardlink"):
+                with self.subTest(directory=directory, kind=kind):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        record, lock, _ = self.make_record_tree(root)
+                        container = record.parent / directory
+                        target = (
+                            lock
+                            if directory == "locks"
+                            else container / f"{self.version}.json"
+                        )
+                        unexpected = container / "unexpected.json"
+                        if kind == "nested":
+                            unexpected.mkdir()
+                            (unexpected / "nested.json").write_text(
+                                "{}\n", encoding="utf-8"
+                            )
+                        elif kind == "symlink":
+                            unexpected.symlink_to(target.name)
+                        else:
+                            os.link(target, unexpected)
+                        errors = check_compliance.generated_record_errors(root=root)
+                        self.assertTrue(
+                            any("unexpected path" in error for error in errors)
+                        )
 
     def test_core_record_rejects_mutated_source_lock_or_dependency_claim(self) -> None:
         source_url = self.core_lock()["source"]["archiveUrl"]
@@ -689,6 +821,9 @@ class CompliancePolicyTests(unittest.TestCase):
                 any("nested version paths are forbidden" in error for error in errors)
             )
             self.assertEqual(generate_index.records("fetchii-core", root=root), [])
+            rendered = generate_index.render(root=root).decode("utf-8")
+            self.assertNotIn("2026.03.17 — corresponding-source record", rendered)
+            self.assertNotIn("rogue/2026.03.17.md", rendered)
 
     def test_generator_comment_alone_never_marks_record_locked(self) -> None:
         contents = (

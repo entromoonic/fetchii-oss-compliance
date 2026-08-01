@@ -41,6 +41,7 @@ CORE_SOURCE_REPOSITORY = "https://github.com/yt-dlp/yt-dlp.git"
 CORE_SOURCE_HOST = "downloads.beamdrop.entromoonic.com"
 CORE_SOURCE_PREFIX = "/fetchii-core/sources"
 CORE_ARTIFACT_PREFIX = "/fetchii-core"
+POLICY_WORKFLOW = Path(".github/workflows/compliance-policy.yml")
 DEPENDENCY_HOST = "files.pythonhosted.org"
 MAX_SOURCE_ARCHIVE_BYTES = 1_000_000_000
 REQUIRED_SCOPES = (
@@ -272,8 +273,10 @@ def load_validated_release_manifest(
         "inputLockSha256",
     }:
         raise ComplianceError("unexpected core release manifest fields")
+    schema_version = value.get("schemaVersion")
     if (
-        value.get("schemaVersion") != CORE_MANIFEST_SCHEMA_VERSION
+        type(schema_version) is not int
+        or schema_version != CORE_MANIFEST_SCHEMA_VERSION
         or value.get("component") != "fetchii-core"
     ):
         raise ComplianceError("unsupported core release manifest schema")
@@ -941,6 +944,32 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
     return errors
 
 
+def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
+    path = root / POLICY_WORKFLOW
+    label = display_path(path, root=root)
+    try:
+        contents = _stable_regular_bytes(
+            path, label="workflow policy", max_bytes=1_000_000
+        ).decode("utf-8")
+    except ComplianceError as error:
+        return [f"{label}: {error}"]
+    except UnicodeDecodeError as error:
+        return [f"{label}: invalid UTF-8: {error}"]
+
+    errors: list[str] = []
+    if not re.search(r"(?m)^permissions:\n  contents: read\n\njobs:", contents):
+        errors.append(f"{label}: workflow permissions must remain read-only")
+    if "run: python3 -m unittest discover -s tests -v" not in contents:
+        errors.append(f"{label}: full compliance unittest gate is missing")
+    for action in re.findall(
+        r"(?m)^\s*(?:-\s*)?uses:\s*([^\s#]+)", contents
+    ):
+        _, separator, revision = action.rpartition("@")
+        if not separator or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            errors.append(f"{label}: action is not pinned to a full commit: {action}")
+    return errors
+
+
 def main() -> int:
     errors = []
     index = subprocess.run(
@@ -954,6 +983,7 @@ def main() -> int:
         errors.append((index.stderr or index.stdout).strip())
     errors.extend(local_link_errors())
     errors.extend(generated_record_errors())
+    errors.extend(workflow_policy_errors())
     setup = (ROOT / "SETUP.md").read_text(encoding="utf-8")
     for forbidden in (
         'curl -fsSL "$SRC_URL"',
