@@ -1,0 +1,1316 @@
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+generate_index = load("generate_index", ROOT / "scripts" / "generate_index.py")
+check_compliance = load("check_compliance", ROOT / "scripts" / "check_compliance.py")
+
+
+class CompliancePolicyTests(unittest.TestCase):
+    version = "2026.03.17"
+    commit = "a" * 40
+    source_digest = "b" * 64
+    artifact_digest = "c" * 64
+    display_version = "1234abcd"
+    expected_dependency_row = (
+        "| `mutagen` | `1.47.0` | "
+        "`runtime` [sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000001]"
+        "(https://files.pythonhosted.org/packages/aa/runtime/mutagen-1.47.0.tar.gz)<br>"
+        "`build` [sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000002]"
+        "(https://files.pythonhosted.org/packages/aa/build/mutagen-1.47.0.tar.gz)<br>"
+        "`pyinstaller` [sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000003]"
+        "(https://files.pythonhosted.org/packages/aa/pyinstaller/"
+        "mutagen-1.47.0.tar.gz)<br>"
+        "`repair` [sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000004]"
+        "(https://files.pythonhosted.org/packages/aa/repair/mutagen-1.47.0.tar.gz)<br>"
+        "`curl-arm64` [sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000005]"
+        "(https://files.pythonhosted.org/packages/aa/curl-arm64/"
+        "mutagen-1.47.0.tar.gz)<br>"
+        "`curl-x86-64` "
+        "[sha256:"
+        "0000000000000000000000000000000000000000000000000000000000000006]"
+        "(https://files.pythonhosted.org/packages/aa/curl-x86-64/"
+        "mutagen-1.47.0.tar.gz) |"
+    )
+
+    @property
+    def artifact_url(self) -> str:
+        return (
+            "https://downloads.beamdrop.entromoonic.com/fetchii-core/"
+            f"fetchii-core_macos_{self.version}.tar.gz"
+        )
+
+    def core_lock(self) -> dict:
+        return {
+            "schemaVersion": 2,
+            "component": "fetchii-core",
+            "version": self.version,
+            "source": {
+                "repository": "https://github.com/yt-dlp/yt-dlp.git",
+                "tag": self.version,
+                "commit": self.commit,
+                "archiveUrl": (
+                    "https://downloads.beamdrop.entromoonic.com/"
+                    f"fetchii-core/sources/{self.version}/{self.commit}/"
+                    f"{self.source_digest}.tar.gz"
+                ),
+                "archiveSha256": self.source_digest,
+                "archiveSize": 123456,
+            },
+            "toolchain": {
+                "pythonImplementation": "CPython",
+                "pythonVersion": "3.12.10",
+                "pipVersion": "25.1.1",
+                "targetPlatform": "macos",
+                "targetArchitecture": "universal2",
+            },
+            "dependencies": [
+                {
+                    "name": "mutagen",
+                    "version": "1.47.0",
+                    "artifacts": [
+                        {
+                            "scope": scope,
+                            "url": (
+                                "https://files.pythonhosted.org/packages/aa/"
+                                f"{scope}/mutagen-1.47.0.tar.gz"
+                            ),
+                            "sha256": f"{index + 1:064x}",
+                        }
+                        for index, scope in enumerate(
+                            (
+                                "runtime",
+                                "build",
+                                "pyinstaller",
+                                "repair",
+                                "curl-arm64",
+                                "curl-x86-64",
+                            )
+                        )
+                    ],
+                }
+            ],
+        }
+
+    def write_lock(self, path: Path, value: dict, *, canonical: bool = True) -> bytes:
+        if canonical:
+            raw = check_compliance.canonical_json_bytes(value)
+        else:
+            raw = (json.dumps(value, indent=2) + "\n").encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return raw
+
+    def render_record(self, lock: dict, lock_digest: str) -> str:
+        source = lock["source"]
+        toolchain = lock["toolchain"]
+        return "\n".join(
+            [
+                "<!-- generated by release_records.py; deterministic; do not edit -->",
+                f"# fetchii-core {lock['version']} — corresponding-source record",
+                "",
+                "- **Schema:** `fetchii-core-record/v3`",
+                f"- **Display version:** `{self.display_version}`",
+                (
+                    "- **Artifact:** [immutable tarball]"
+                    f"({self.artifact_url}) (`sha256: {self.artifact_digest}`)"
+                ),
+                f"- **Input lock:** [`{lock_digest}`](locks/{lock['version']}.json)",
+                f"- **Source repository:** [{source['repository']}]({source['repository']})",
+                f"- **yt-dlp tag:** `{source['tag']}`",
+                (
+                    f"- **yt-dlp commit:** [`{source['commit']}`]"
+                    f"(https://github.com/yt-dlp/yt-dlp/commit/{source['commit']})"
+                ),
+                (
+                    f"- **Locked source object:** [archive]({source['archiveUrl']}) "
+                    f"(`sha256: {source['archiveSha256']}`, "
+                    f"`{source['archiveSize']}` bytes)"
+                ),
+                (
+                    "- **Toolchain:** "
+                    f"{toolchain['pythonImplementation']} {toolchain['pythonVersion']}, "
+                    f"pip {toolchain['pipVersion']}, "
+                    f"{toolchain['targetPlatform']} {toolchain['targetArchitecture']}."
+                ),
+                (
+                    "- **License:** the bundle includes `mutagen` under "
+                    "GPLv2-or-later; see `../GPLv2.txt`."
+                ),
+                (
+                    "- **Build recipe:** `python3 -m bundle.pyinstaller --onedir "
+                    "--target-architecture universal2`."
+                ),
+                "",
+                (
+                    "Reproduction must use the locked source object and every "
+                    "dependency artifact below."
+                ),
+                (
+                    "Do not resolve a tag, `latest` URL, package range, or "
+                    "installed environment again."
+                ),
+                "",
+                "## Locked dependencies",
+                "",
+                "| Name | Exact version | Source artifact(s) |",
+                "|---|---:|---|",
+                self.expected_dependency_row,
+                "",
+            ]
+        )
+
+    def release_manifest(self, lock_digest: str) -> dict:
+        return {
+            "schemaVersion": 1,
+            "component": "fetchii-core",
+            "version": self.version,
+            "displayVersion": self.display_version,
+            "artifactUrl": self.artifact_url,
+            "artifactSha256": self.artifact_digest,
+            "inputLockSha256": lock_digest,
+        }
+
+    def write_manifest(
+        self, path: Path, value: dict, *, canonical: bool = True
+    ) -> bytes:
+        if canonical:
+            raw = check_compliance.canonical_json_bytes(value)
+        else:
+            raw = (json.dumps(value, indent=2) + "\n").encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        return raw
+
+    def validate_value(self, value: dict, *, canonical: bool = True) -> list[str]:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "lock.json"
+            self.write_lock(path, value, canonical=canonical)
+            return check_compliance.validate_lock(path, root=Path(temporary))
+
+    def make_record_tree(self, root: Path) -> tuple[Path, Path, str]:
+        for component in ("aria2", "fetchii-core", "ffmpeg"):
+            (root / component / "versions").mkdir(parents=True, exist_ok=True)
+        lock = self.core_lock()
+        lock_path = (
+            root / "fetchii-core" / "versions" / "locks" / f"{self.version}.json"
+        )
+        raw = self.write_lock(lock_path, lock)
+        digest = hashlib.sha256(raw).hexdigest()
+        record_path = lock_path.parent.parent / f"{self.version}.md"
+        record_path.write_text(self.render_record(lock, digest), encoding="utf-8")
+        manifest_path = record_path.parent / "manifests" / f"{self.version}.json"
+        self.write_manifest(manifest_path, self.release_manifest(digest))
+        return record_path, lock_path, digest
+
+    def make_aria2_record_tree(
+        self,
+        root: Path,
+        *,
+        version: str = "1.38.0",
+    ) -> tuple[Path, Path]:
+        for component in ("aria2", "fetchii-core", "ffmpeg"):
+            (root / component / "versions").mkdir(parents=True, exist_ok=True)
+        source_digest = "d" * 64
+        artifact_digest = "e" * 64
+        record_raw = check_compliance.render_aria2_record(
+            version,
+            source_digest,
+            artifact_digest,
+        )
+        record = root / "aria2" / "versions" / f"{version}.md"
+        record.write_bytes(record_raw)
+        origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
+            version
+        )
+        evidence = {
+            "schemaVersion": 3,
+            "component": "aria2",
+            "version": version,
+            "sourceRevision": f"release-{version}",
+            "sourceOriginUrl": origin_url,
+            "sourceArchiveUrl": archive_url,
+            "sourceArchiveSha256": source_digest,
+            "artifactSha256": artifact_digest,
+            "artifactUrl": artifact_url,
+            "recordSha256": hashlib.sha256(record_raw).hexdigest(),
+        }
+        evidence_path = root / "aria2" / "versions" / "evidence" / f"{version}.json"
+        evidence_path.parent.mkdir()
+        evidence_path.write_bytes(check_compliance.canonical_json_bytes(evidence))
+        return record, evidence_path
+
+    def validate_record(self, record: Path, *, root: Path) -> list[str]:
+        return check_compliance.validate_core_record(
+            record,
+            artifact_url=self.artifact_url,
+            artifact_sha256=self.artifact_digest,
+            display_version=self.display_version,
+            root=root,
+        )
+
+    def git(self, root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=result.stderr.decode("utf-8", errors="replace"),
+        )
+        return result
+
+    def make_append_only_repository(self, root: Path) -> str:
+        protected = {
+            "aria2/versions/1.37.0.md": b"aria record\n",
+            "aria2/versions/evidence/1.37.0.json": b"aria evidence\n",
+            "fetchii-core/versions/2026.03.17.md": b"core record\n",
+            "fetchii-core/versions/locks/2026.03.17.json": b"core lock\n",
+            "fetchii-core/versions/manifests/2026.03.17.json": b"manifest\n",
+            "ffmpeg/versions/8.0.md": b"ffmpeg record\n",
+            "fetchii-core/versions/TEMPLATE.md": b"editable template\n",
+        }
+        for relative, payload in protected.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        self.git(root, "init", "-b", "main")
+        self.git(root, "config", "user.name", "Compliance Test")
+        self.git(root, "config", "user.email", "compliance@example.invalid")
+        self.git(root, "add", ".")
+        self.git(root, "commit", "-m", "base records")
+        return self.git(root, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+
+    def test_index_is_byte_deterministic_and_current(self) -> None:
+        first = generate_index.render()
+        second = generate_index.render()
+        self.assertEqual(first, second)
+        self.assertEqual((ROOT / "fetchii-releases.md").read_bytes(), first)
+
+    def test_index_cli_check_write_and_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for component in generate_index.COMPONENTS:
+                (root / component / "versions").mkdir(parents=True)
+            output = root / "fetchii-releases.md"
+            expected = generate_index.render(root=root)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(generate_index, "ROOT", root),
+                mock.patch.object(generate_index, "OUTPUT", output),
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+            ):
+                with mock.patch.object(
+                    generate_index.sys, "argv", ["generate_index.py", "--check"]
+                ):
+                    self.assertEqual(generate_index.main(), 1)
+                    output.write_bytes(b"stale\n")
+                    self.assertEqual(generate_index.main(), 1)
+                    output.write_bytes(expected)
+                    self.assertEqual(generate_index.main(), 0)
+                with mock.patch.object(
+                    generate_index.sys, "argv", ["generate_index.py"]
+                ):
+                    output.write_bytes(b"stale again\n")
+                    self.assertEqual(generate_index.main(), 0)
+                    self.assertEqual(output.read_bytes(), expected)
+
+    def test_index_title_and_aria_status_error_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "record.md"
+            path.write_text("no markdown title\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                generate_index.title(path)
+        aria = (
+            "- **Schema:** `aria2-record/v2`\n"
+            f"- **Artifact:** `sha256: {'a' * 64}`\n"
+            f"- **Source:** `sha256: {'b' * 64}`\n"
+            "- **Source revision:** `release-1.37.0`\n"
+        )
+        self.assertEqual(generate_index.status("aria2", aria), "locked v2 record")
+
+    def test_repository_has_no_dead_local_markdown_links(self) -> None:
+        self.assertEqual(check_compliance.local_link_errors(), [])
+
+    def test_repository_policy_main_passes(self) -> None:
+        self.assertEqual(check_compliance.main([]), 0)
+
+    def test_workflow_policy_requires_tests_read_only_permissions_and_pins(
+        self,
+    ) -> None:
+        self.assertEqual(check_compliance.workflow_policy_errors(), [])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / check_compliance.POLICY_WORKFLOW
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "permissions:\n  contents: write\n\njobs:\n"
+                "  test:\n    steps:\n      - uses: actions/checkout@v4\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.workflow_policy_errors(root=root)
+            self.assertTrue(any("read-only" in error for error in errors))
+            self.assertTrue(any("base history" in error for error in errors))
+            self.assertTrue(any("unittest" in error for error in errors))
+            self.assertTrue(any("append-only" in error for error in errors))
+            self.assertTrue(any("full commit" in error for error in errors))
+        with tempfile.TemporaryDirectory() as temporary:
+            errors = check_compliance.workflow_policy_errors(root=Path(temporary))
+            self.assertTrue(any("cannot safely open" in error for error in errors))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / check_compliance.POLICY_WORKFLOW
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"\xff")
+            errors = check_compliance.workflow_policy_errors(root=root)
+            self.assertTrue(any("invalid UTF-8" in error for error in errors))
+
+    def test_append_only_history_allows_only_new_protected_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            additions = {
+                "aria2/versions/1.38.0.md": b"new aria record\n",
+                "aria2/versions/evidence/1.38.0.json": b"new aria evidence\n",
+                "fetchii-core/versions/2026.03.18.md": b"new core record\n",
+                "fetchii-core/versions/locks/2026.03.18.json": b"new lock\n",
+                "fetchii-core/versions/manifests/2026.03.18.json": b"new manifest\n",
+                "ffmpeg/versions/8.1.md": b"new ffmpeg record\n",
+            }
+            for relative, payload in additions.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            self.assertEqual(
+                check_compliance.append_only_history_errors(base, root=root), []
+            )
+
+    def test_append_only_history_protects_aria_evidence_and_ffmpeg_but_not_template(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            ffmpeg = root / "ffmpeg/versions/8.0.md"
+            aria_evidence = root / "aria2/versions/evidence/1.37.0.json"
+            template = root / "fetchii-core/versions/TEMPLATE.md"
+            ffmpeg.write_bytes(b"rewritten ffmpeg record\n")
+            aria_evidence.write_bytes(b"rewritten aria evidence\n")
+            template.write_bytes(b"updated template for a future schema\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any(str(ffmpeg.relative_to(root)) in e for e in errors))
+            self.assertTrue(
+                any(str(aria_evidence.relative_to(root)) in e for e in errors)
+            )
+            self.assertFalse(any(str(template.relative_to(root)) in e for e in errors))
+
+    def test_append_only_cli_rejects_ffmpeg_rewrite_and_delete(self) -> None:
+        for mutation in ("rewrite", "delete"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary) / "repository"
+                shutil.copytree(
+                    ROOT,
+                    root,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", ".coverage"),
+                )
+                self.git(root, "init", "-b", "main")
+                self.git(root, "config", "user.name", "Compliance Test")
+                self.git(root, "config", "user.email", "compliance@example.invalid")
+                self.git(root, "add", ".")
+                self.git(root, "commit", "-m", "base compliance tree")
+                base = (
+                    self.git(root, "rev-parse", "HEAD").stdout.decode("ascii").strip()
+                )
+                record = root / "ffmpeg/versions/8.0.md"
+                if mutation == "rewrite":
+                    record.write_bytes(record.read_bytes() + b"rewritten\n")
+                else:
+                    record.unlink()
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "scripts/check_compliance.py",
+                        "--append-only-base",
+                        base,
+                    ],
+                    cwd=root,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"ffmpeg/versions/8.0.md", result.stderr)
+
+    def test_append_only_history_rejects_coordinated_record_manifest_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            record = root / "fetchii-core/versions/2026.03.17.md"
+            manifest = root / "fetchii-core/versions/manifests/2026.03.17.json"
+            record.write_bytes(b"coordinated replacement record\n")
+            manifest.write_bytes(b"coordinated replacement manifest\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any(str(record.relative_to(root)) in e for e in errors))
+            self.assertTrue(any(str(manifest.relative_to(root)) in e for e in errors))
+
+    def test_append_only_history_rejects_delete_and_existing_lock_rewrite(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            deleted = root / "aria2/versions/1.37.0.md"
+            rewritten_lock = root / "fetchii-core/versions/locks/2026.03.17.json"
+            deleted.unlink()
+            rewritten_lock.write_bytes(b"rewritten lock\n")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any("deleted or replaced" in error for error in errors))
+            self.assertTrue(any("protected bytes were modified" in e for e in errors))
+
+    def test_append_only_history_fails_closed_without_valid_base_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base = self.make_append_only_repository(root)
+            self.assertTrue(check_compliance.append_only_history_errors("", root=root))
+            self.assertTrue(
+                check_compliance.append_only_history_errors("f" * 40, root=root)
+            )
+            self.git(root, "checkout", "--orphan", "unrelated")
+            unrelated = root / "unrelated.txt"
+            unrelated.write_text("unrelated\n", encoding="utf-8")
+            self.git(root, "add", "unrelated.txt")
+            self.git(root, "commit", "-m", "unrelated history")
+            errors = check_compliance.append_only_history_errors(base, root=root)
+            self.assertTrue(any("not an ancestor" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            errors = check_compliance.append_only_history_errors(
+                "a" * 40, root=Path(temporary)
+            )
+            self.assertTrue(any("git worktree" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_root = Path(temporary)
+            source = temporary_root / "source"
+            clone = temporary_root / "shallow"
+            source.mkdir()
+            base = self.make_append_only_repository(source)
+            clone_result = subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--no-local",
+                    str(source),
+                    str(clone),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(clone_result.returncode, 0)
+            errors = check_compliance.append_only_history_errors(base, root=clone)
+            self.assertTrue(any("non-shallow" in error for error in errors))
+
+    def test_core_lock_v2_accepts_exact_source_toolchain_and_six_scopes(self) -> None:
+        self.assertEqual(self.validate_value(self.core_lock()), [])
+
+    def test_core_lock_requires_canonical_bytes_and_unique_json_keys(self) -> None:
+        self.assertTrue(self.validate_value(self.core_lock(), canonical=False))
+        value = self.core_lock()
+        raw = check_compliance.canonical_json_bytes(value).decode("utf-8")
+        duplicate = raw.replace(
+            '"component":"fetchii-core",',
+            '"component":"fetchii-core","component":"fetchii-core",',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "lock.json"
+            path.write_text(duplicate, encoding="utf-8")
+            errors = check_compliance.validate_lock(path, root=Path(temporary))
+        self.assertTrue(any("duplicate" in error for error in errors))
+
+    def test_core_lock_rejects_floating_or_noncanonical_pep440_version(self) -> None:
+        for version in (">=1.47", "01.47.0"):
+            with self.subTest(version):
+                value = self.core_lock()
+                value["dependencies"][0]["version"] = version
+                errors = self.validate_value(value)
+                self.assertTrue(any("version" in error for error in errors))
+
+    def test_core_lock_requires_every_scope_and_runtime_mutagen(self) -> None:
+        for mutation in ("missing-scope", "missing-runtime-mutagen"):
+            with self.subTest(mutation):
+                value = self.core_lock()
+                artifacts = value["dependencies"][0]["artifacts"]
+                scope = "repair" if mutation == "missing-scope" else "runtime"
+                artifacts[:] = [item for item in artifacts if item["scope"] != scope]
+                if mutation == "missing-runtime-mutagen":
+                    value["dependencies"].append(
+                        {
+                            "name": "runtime-provider",
+                            "version": "1.0",
+                            "artifacts": [
+                                {
+                                    "scope": "runtime",
+                                    "url": (
+                                        "https://files.pythonhosted.org/packages/aa/"
+                                        "runtime/provider-1.0.tar.gz"
+                                    ),
+                                    "sha256": "f" * 64,
+                                }
+                            ],
+                        }
+                    )
+                self.assertTrue(self.validate_value(value))
+
+    def test_core_lock_binds_source_tag_commit_url_digest_and_size(self) -> None:
+        mutations = (
+            ("tag", "2026.03.18"),
+            ("commit", "not-a-commit"),
+            ("archiveUrl", "https://example.com/latest.tar.gz"),
+            ("archiveSha256", "not-a-digest"),
+            ("archiveSize", 0),
+            ("archiveSize", True),
+        )
+        for field, replacement in mutations:
+            with self.subTest(field=field, replacement=replacement):
+                value = self.core_lock()
+                value["source"][field] = replacement
+                self.assertTrue(self.validate_value(value))
+
+    def test_core_lock_rejects_mutable_or_non_pypi_dependency_urls(self) -> None:
+        for url in (
+            "https://files.pythonhosted.org/packages/aa/runtime/file.whl?token=secret",
+            "https://pypi.org/packages/aa/runtime/file.whl",
+            "https://user@files.pythonhosted.org/packages/aa/runtime/file.whl",
+            "https://files.pythonhosted.org/packages/aa/runtime/evil%0Afile.whl",
+            "https://files.pythonhosted.org/packages/aa/runtime/evil%2Ffile.whl",
+        ):
+            with self.subTest(url):
+                value = self.core_lock()
+                value["dependencies"][0]["artifacts"][0]["url"] = url
+                self.assertTrue(self.validate_value(value))
+
+    def test_core_lock_requires_exact_cpython_macos_universal2_toolchain(self) -> None:
+        for field, replacement in (
+            ("pythonImplementation", "PyPy"),
+            ("pythonVersion", "3.12"),
+            ("pipVersion", ">=25"),
+            ("pipVersion", "025.1.1"),
+            ("targetPlatform", "linux"),
+            ("targetArchitecture", "arm64"),
+        ):
+            with self.subTest(field):
+                value = self.core_lock()
+                value["toolchain"][field] = replacement
+                self.assertTrue(self.validate_value(value))
+
+    def test_core_record_independently_matches_lock_and_fixed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            self.assertEqual(self.validate_record(record, root=root), [])
+            self.assertEqual(
+                check_compliance.validate_manifest_bound_core_record(record, root=root),
+                [],
+            )
+            self.assertEqual(check_compliance.generated_record_errors(root=root), [])
+
+    def test_aria2_v3_record_and_canonical_evidence_are_one_fixed_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            self.assertEqual(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                ),
+                [],
+            )
+            self.assertEqual(check_compliance.generated_record_errors(root=root), [])
+            contents = record.read_text(encoding="utf-8")
+            self.assertEqual(
+                check_compliance.record_status("aria2", contents),
+                "locked v3 record",
+            )
+            self.assertEqual(
+                generate_index.status("aria2", contents),
+                "locked v3 record",
+            )
+
+    def test_aria2_v3_rejects_role_schema_digest_and_byte_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            original = record.read_bytes()
+            origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
+                "1.38.0"
+            )
+            role_placeholder = b"https://invalid.local/role-placeholder"
+            roles_swapped = (
+                original.replace(origin_url.encode("utf-8"), role_placeholder, 1)
+                .replace(
+                    archive_url.encode("utf-8"),
+                    origin_url.encode("utf-8"),
+                    1,
+                )
+                .replace(role_placeholder, archive_url.encode("utf-8"), 1)
+            )
+            mutations = {
+                "old schema": original.replace(
+                    b"aria2-record/v3", b"aria2-record/v2", 1
+                ),
+                "origin as carried archive": original.replace(
+                    archive_url.encode("utf-8"), origin_url.encode("utf-8"), 1
+                ),
+                "carried archive as artifact": original.replace(
+                    artifact_url.encode("utf-8"), archive_url.encode("utf-8"), 1
+                ),
+                "origin and carried archive roles swapped": roles_swapped,
+                "uppercase digest": re.sub(
+                    rb"sha256: ([0-9a-f]{64})",
+                    lambda match: b"sha256: " + match.group(1).upper(),
+                    original,
+                    count=1,
+                ),
+                "extra byte": original + b"\n",
+                "CRLF": original.replace(b"\n", b"\r\n"),
+            }
+            for label, payload in mutations.items():
+                with self.subTest(label=label):
+                    record.write_bytes(payload)
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+            record.write_bytes(original)
+
+    def test_aria2_v3_rejects_missing_or_forged_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            original = json.loads(evidence.read_text(encoding="utf-8"))
+            mutations = {
+                "wrong record digest": {**original, "recordSha256": "0" * 64},
+                "wrong source digest": {
+                    **original,
+                    "sourceArchiveSha256": "1" * 64,
+                },
+                "wrong artifact URL": {
+                    **original,
+                    "artifactUrl": original["sourceArchiveUrl"],
+                },
+                "extra field": {**original, "unexpected": "value"},
+                "boolean schema": {**original, "schemaVersion": True},
+            }
+            for label, value in mutations.items():
+                with self.subTest(label=label):
+                    evidence.write_bytes(check_compliance.canonical_json_bytes(value))
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+            evidence.unlink()
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+            evidence.write_bytes(check_compliance.canonical_json_bytes(original))
+            orphan = evidence.with_name("1.39.0.json")
+            orphan.write_bytes(evidence.read_bytes())
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("evidence has no locked v3 record" in error for error in errors)
+            )
+
+    def test_aria2_v3_rejects_noncanonical_or_nonregular_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            canonical = evidence.read_bytes()
+            for label, payload in {
+                "CRLF": canonical.replace(b"\n", b"\r\n"),
+                "extra byte": canonical + b"\n",
+            }.items():
+                with self.subTest(label=label):
+                    evidence.write_bytes(payload)
+                    self.assertTrue(
+                        check_compliance.validate_aria2_v3_record(
+                            record,
+                            evidence,
+                            root=root,
+                        )
+                    )
+
+            backing = evidence.with_name("backing.json")
+            backing.write_bytes(canonical)
+            evidence.unlink()
+            evidence.symlink_to(backing.name)
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+
+            evidence.unlink()
+            os.link(backing, evidence)
+            self.assertTrue(
+                check_compliance.validate_aria2_v3_record(
+                    record,
+                    evidence,
+                    root=root,
+                )
+            )
+
+            evidence.unlink()
+            backing.unlink()
+            evidence.write_bytes(canonical)
+            nested = evidence.parent / "nested"
+            nested.mkdir()
+            self.assertTrue(
+                any(
+                    "evidence directory contains an unexpected path" in error
+                    for error in check_compliance.generated_record_errors(root=root)
+                )
+            )
+
+    def test_aria2_v3_record_filename_must_match_evidence_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            renamed = record.with_name("1.38.1.md")
+            record.rename(renamed)
+            errors = check_compliance.validate_aria2_v3_record(
+                renamed,
+                evidence,
+                root=root,
+            )
+            self.assertTrue(
+                any("fixed-path versions differ" in error for error in errors)
+            )
+
+    def test_only_exact_historical_aria2_and_core_recipes_are_accepted(self) -> None:
+        fixtures = (
+            ("aria2", "1.37.0"),
+            ("fetchii-core", "2026.06.09"),
+            ("fetchii-core", "2026.07.04"),
+        )
+        for component, version in fixtures:
+            with self.subTest(component=component, version=version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    for name in generate_index.COMPONENTS:
+                        (root / name / "versions").mkdir(parents=True)
+                    source = ROOT / component / "versions" / f"{version}.md"
+                    record = root / component / "versions" / f"{version}.md"
+                    shutil.copyfile(source, record)
+                    self.assertEqual(
+                        check_compliance.generated_record_errors(root=root), []
+                    )
+                    record.write_bytes(record.read_bytes() + b"\n")
+                    self.assertTrue(check_compliance.generated_record_errors(root=root))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in generate_index.COMPONENTS:
+                (root / name / "versions").mkdir(parents=True)
+            (root / "aria2" / "versions" / "1.38.0.md").write_text(
+                "# new manual aria2 recipe\n",
+                encoding="utf-8",
+            )
+            (root / "fetchii-core" / "versions" / "2026.08.01.md").write_text(
+                "# new manual core recipe\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertEqual(
+                sum("must use the locked v3 schema" in error for error in errors),
+                2,
+            )
+
+    def test_repository_pins_every_pre_policy_recipe_byte(self) -> None:
+        self.assertEqual(check_compliance.historical_repository_errors(), [])
+
+    def test_core_record_full_byte_oracle_rejects_every_unlocked_field(self) -> None:
+        mutations = (
+            ("- **Display version:** `1234abcd`", "- **Display version:** `deadbeef`"),
+            (
+                "- **License:** the bundle includes `mutagen` under GPLv2-or-later; "
+                "see `../GPLv2.txt`.",
+                "- **License:** unknown",
+            ),
+            (
+                "- **Build recipe:** `python3 -m bundle.pyinstaller --onedir "
+                "--target-architecture universal2`.",
+                "- **Build recipe:** `pip install latest`.",
+            ),
+            (
+                "Reproduction must use the locked source object and every "
+                "dependency artifact below.",
+                "Reproduction may redownload dependencies.",
+            ),
+            (
+                "Do not resolve a tag, `latest` URL, package range, or "
+                "installed environment again.",
+                "Resolve the current environment again.",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before[:32]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    self.assertIn(before, contents)
+                    record.write_text(
+                        contents.replace(before, after, 1), encoding="utf-8"
+                    )
+                    self.assertTrue(self.validate_record(record, root=root))
+
+    def test_core_record_rejects_duplicate_or_conflicting_fields(self) -> None:
+        additions = (
+            "- **Display version:** `deadbeef`\n",
+            f"- **Artifact:** [immutable tarball]({self.artifact_url}) "
+            f"(`sha256: {'d' * 64}`)\n",
+            "- **License:** conflicting license claim\n",
+            "Reproduction may use `latest`.\n",
+        )
+        for addition in additions:
+            with self.subTest(addition=addition[:40]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    record.write_bytes(record.read_bytes() + addition.encode("utf-8"))
+                    self.assertTrue(
+                        check_compliance.validate_manifest_bound_core_record(
+                            record, root=root
+                        )
+                    )
+
+    def test_core_record_oracle_rejects_byte_boundary_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            canonical = record.read_bytes()
+            mutations = (
+                canonical[:-1],
+                canonical + b"\n",
+                b"\xef\xbb\xbf" + canonical,
+                canonical.replace(b"\n", b"\r\n"),
+            )
+            for mutation in mutations:
+                with self.subTest(prefix=mutation[:12], size=len(mutation)):
+                    record.write_bytes(mutation)
+                    self.assertTrue(
+                        check_compliance.validate_manifest_bound_core_record(
+                            record, root=root
+                        )
+                    )
+                    record.write_bytes(canonical)
+
+    def test_core_record_rejects_latest_or_foreign_artifact_url(self) -> None:
+        for replacement in (
+            "https://downloads.beamdrop.entromoonic.com/fetchii-core/latest.tar.gz",
+            f"https://example.com/fetchii-core_macos_{self.version}.tar.gz",
+        ):
+            with self.subTest(replacement=replacement):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    record.write_text(
+                        contents.replace(self.artifact_url, replacement, 1),
+                        encoding="utf-8",
+                    )
+                    errors = check_compliance.validate_manifest_bound_core_record(
+                        record, root=root
+                    )
+                    self.assertTrue(
+                        any("canonical lock-bound oracle" in error for error in errors)
+                    )
+
+    def test_generated_policy_rejects_display_or_artifact_digest_record_tamper(
+        self,
+    ) -> None:
+        for before, after in (
+            (self.display_version, "deadbeef"),
+            (self.artifact_digest, "d" * 64),
+        ):
+            with self.subTest(before=before[:12]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    record.write_text(
+                        contents.replace(before, after, 1), encoding="utf-8"
+                    )
+                    errors = check_compliance.generated_record_errors(root=root)
+                    self.assertTrue(
+                        any("canonical lock-bound oracle" in error for error in errors)
+                    )
+
+    def test_release_manifest_is_canonical_strict_and_lock_bound(self) -> None:
+        mutations = (
+            ("displayVersion", "not-hex"),
+            ("artifactSha256", "d" * 63),
+            ("artifactUrl", "https://example.com/latest.tar.gz"),
+            ("inputLockSha256", "e" * 64),
+            ("version", "2026.03.18"),
+            ("component", "other"),
+            ("schemaVersion", 2),
+        )
+        for field, replacement in mutations:
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, digest = self.make_record_tree(root)
+                    manifest_path = record.parent / "manifests" / f"{self.version}.json"
+                    manifest = self.release_manifest(digest)
+                    manifest[field] = replacement
+                    self.write_manifest(manifest_path, manifest)
+                    self.assertTrue(check_compliance.generated_record_errors(root=root))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, digest = self.make_record_tree(root)
+            manifest_path = record.parent / "manifests" / f"{self.version}.json"
+            self.write_manifest(
+                manifest_path, self.release_manifest(digest), canonical=False
+            )
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(any("not canonical" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, digest = self.make_record_tree(root)
+            manifest_path = record.parent / "manifests" / f"{self.version}.json"
+            manifest = self.release_manifest(digest)
+            manifest["unexpected"] = True
+            self.write_manifest(manifest_path, manifest)
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(any("unexpected" in error for error in errors))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            manifest_path = record.parent / "manifests" / f"{self.version}.json"
+            raw = manifest_path.read_text(encoding="utf-8")
+            raw = raw.replace(
+                '"component":"fetchii-core",',
+                '"component":"fetchii-core","component":"fetchii-core",',
+                1,
+            )
+            manifest_path.write_text(raw, encoding="utf-8")
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(any("duplicate" in error for error in errors))
+
+    def test_generated_policy_rejects_boolean_or_float_manifest_schema(self) -> None:
+        for schema_version in (True, 1.0):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, digest = self.make_record_tree(root)
+                    manifest_path = record.parent / "manifests" / f"{self.version}.json"
+                    manifest = self.release_manifest(digest)
+                    manifest["schemaVersion"] = schema_version
+                    self.write_manifest(manifest_path, manifest)
+                    errors = check_compliance.generated_record_errors(root=root)
+                    self.assertTrue(any("unsupported" in error for error in errors))
+
+    def test_generated_policy_rejects_boolean_or_float_lock_schema(self) -> None:
+        for schema_version in (True, False, 2.0):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, lock_path, _ = self.make_record_tree(root)
+                    lock = self.core_lock()
+                    lock["schemaVersion"] = schema_version
+                    self.write_lock(lock_path, lock)
+                    errors = check_compliance.generated_record_errors(root=root)
+                    self.assertTrue(
+                        any("unsupported core lock schema" in error for error in errors)
+                    )
+
+    def test_generated_policy_requires_independent_release_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            manifest_path = record.parent / "manifests" / f"{self.version}.json"
+            manifest_path.unlink()
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("release manifest is invalid" in error for error in errors)
+            )
+
+    def test_core_record_oracle_rejects_missing_dependency_scope(self) -> None:
+        scopes = (
+            "runtime",
+            "build",
+            "pyinstaller",
+            "repair",
+            "curl-arm64",
+            "curl-x86-64",
+        )
+        for scope in scopes:
+            with self.subTest(scope=scope):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    start = contents.index(f"`{scope}` [sha256:")
+                    separator = contents.find("<br>", start)
+                    if separator >= 0:
+                        end = separator + len("<br>")
+                    else:
+                        end = contents.index(" |", start)
+                    record.write_text(
+                        contents[:start] + contents[end:], encoding="utf-8"
+                    )
+                    errors = check_compliance.validate_manifest_bound_core_record(
+                        record, root=root
+                    )
+                    self.assertTrue(
+                        any("canonical lock-bound oracle" in error for error in errors)
+                    )
+
+    def test_record_renderer_rejects_invalid_independent_inputs(self) -> None:
+        lock = self.core_lock()
+        raw_lock = check_compliance.canonical_json_bytes(lock)
+        mutations = (
+            {"display_version": "not-hex"},
+            {"artifact_sha256": "d" * 63},
+            {"artifact_url": "https://example.com/latest.tar.gz"},
+        )
+        defaults = {
+            "display_version": self.display_version,
+            "artifact_sha256": self.artifact_digest,
+            "artifact_url": self.artifact_url,
+        }
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                arguments = defaults | mutation
+                with self.assertRaises(check_compliance.ComplianceError):
+                    check_compliance.render_core_record(lock, raw_lock, **arguments)
+
+        lock["version"] = 1
+        with self.assertRaises(check_compliance.ComplianceError):
+            check_compliance.render_core_record(
+                lock,
+                raw_lock,
+                artifact_url=self.artifact_url,
+                artifact_sha256=self.artifact_digest,
+                display_version=self.display_version,
+            )
+
+    def test_policy_rejects_orphan_and_unexpected_sidecar_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            record.unlink()
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("input lock has no fixed-path record" in error for error in errors)
+            )
+            self.assertTrue(
+                any("release manifest has no fixed-path record" in e for e in errors)
+            )
+
+        unexpected_paths = (
+            ("versions", "unexpected.txt"),
+            ("locks", "unexpected.txt"),
+            ("manifests", "unexpected.txt"),
+        )
+        for directory, name in unexpected_paths:
+            with self.subTest(directory=directory):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    base = (
+                        record.parent
+                        if directory == "versions"
+                        else record.parent / directory
+                    )
+                    (base / name).write_text("unexpected\n", encoding="utf-8")
+                    self.assertTrue(check_compliance.generated_record_errors(root=root))
+
+    def test_policy_rejects_nested_linked_or_hardlinked_sidecars(self) -> None:
+        for directory in ("locks", "manifests"):
+            for kind in ("nested", "symlink", "hardlink"):
+                with self.subTest(directory=directory, kind=kind):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        record, lock, _ = self.make_record_tree(root)
+                        container = record.parent / directory
+                        target = (
+                            lock
+                            if directory == "locks"
+                            else container / f"{self.version}.json"
+                        )
+                        unexpected = container / "unexpected.json"
+                        if kind == "nested":
+                            unexpected.mkdir()
+                            (unexpected / "nested.json").write_text(
+                                "{}\n", encoding="utf-8"
+                            )
+                        elif kind == "symlink":
+                            unexpected.symlink_to(target.name)
+                        else:
+                            os.link(target, unexpected)
+                        errors = check_compliance.generated_record_errors(root=root)
+                        self.assertTrue(
+                            any("unexpected path" in error for error in errors)
+                        )
+
+    def test_core_record_rejects_mutated_source_lock_or_dependency_claim(self) -> None:
+        source_url = self.core_lock()["source"]["archiveUrl"]
+        mutations = (
+            (f"- **yt-dlp tag:** `{self.version}`", "- **yt-dlp tag:** `2026.03.18`"),
+            (self.commit, "d" * 40),
+            (source_url, "https://example.com/source.tar.gz"),
+            (f"sha256: {self.source_digest}", "sha256: " + "e" * 64),
+            ("`123456` bytes", "`123457` bytes"),
+            ("sha256:" + f"{1:064x}", "sha256:" + "f" * 64),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before[:32]):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    record, _, _ = self.make_record_tree(root)
+                    contents = record.read_text(encoding="utf-8")
+                    self.assertIn(before, contents)
+                    record.write_text(
+                        contents.replace(before, after, 1), encoding="utf-8"
+                    )
+                    self.assertTrue(self.validate_record(record, root=root))
+
+    def test_core_record_rejects_lock_digest_and_filename_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, digest = self.make_record_tree(root)
+            contents = record.read_text(encoding="utf-8").replace(digest, "f" * 64, 1)
+            record.write_text(contents, encoding="utf-8")
+            self.assertTrue(self.validate_record(record, root=root))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            wrong = record.with_name("2026.03.18.md")
+            record.rename(wrong)
+            self.assertTrue(self.validate_record(wrong, root=root))
+
+    def test_core_record_rejects_noncanonical_lock_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            canonical = f"locks/{self.version}.json"
+            contents = record.read_text(encoding="utf-8")
+            self.assertIn(canonical, contents)
+            record.write_text(
+                contents.replace(canonical, f"locks/other-{self.version}.json", 1),
+                encoding="utf-8",
+            )
+            self.assertTrue(self.validate_record(record, root=root))
+
+    def test_nested_version_record_is_rejected_and_never_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for component in generate_index.COMPONENTS:
+                (root / component / "versions").mkdir(parents=True)
+            nested = root / "fetchii-core" / "versions" / "rogue" / "2026.03.17.md"
+            nested.parent.mkdir()
+            nested.write_text(
+                "# fetchii-core 2026.03.17 — corresponding-source record\n"
+                "- **Schema:** `fetchii-core-record/v3`\n",
+                encoding="utf-8",
+            )
+            errors = check_compliance.generated_record_errors(root=root)
+            self.assertTrue(
+                any("nested version paths are forbidden" in error for error in errors)
+            )
+            self.assertEqual(generate_index.records("fetchii-core", root=root), [])
+            rendered = generate_index.render(root=root).decode("utf-8")
+            self.assertNotIn("2026.03.17 — corresponding-source record", rendered)
+            self.assertNotIn("rogue/2026.03.17.md", rendered)
+
+    def test_generator_comment_alone_never_marks_record_locked(self) -> None:
+        contents = (
+            "<!-- generated by release_records.py; deterministic; do not edit -->\n"
+            "# incomplete\n"
+        )
+        self.assertEqual(
+            generate_index.status("fetchii-core", contents), "legacy/manual record"
+        )
+        self.assertEqual(
+            check_compliance.record_status("fetchii-core", contents),
+            "legacy/manual record",
+        )
+
+    def test_v3_record_fields_are_classified_without_trusting_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, _, _ = self.make_record_tree(root)
+            contents = record.read_text(encoding="utf-8")
+            self.assertEqual(
+                generate_index.status("fetchii-core", contents), "locked v3 record"
+            )
+            self.assertEqual(
+                check_compliance.record_status("fetchii-core", contents),
+                "locked v3 record",
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -2,12 +2,18 @@
 
 Fetchii, by **Entromoonic, Ltd.**, is a closed-source application, but it
 redistributes a few components licensed under the GNU **GPL / LGPL**. This repository
-exists to satisfy our obligations under those licenses: it provides the **complete
-corresponding source** and the **exact build recipes** used to produce the binaries we
-ship.
+exists to preserve the corresponding-source and build-input records associated with
+redistributed binaries. Generated core v3 records bind an exact binary digest to a
+locked source object, source revision, exact toolchain, and deterministic dependency
+lock. Older recipe-only entries are retained and explicitly labelled as legacy; their
+presence is not presented as proof that a missing historical digest was captured.
+Generated aria2 v3 records separately bind the canonical upstream origin URL, the
+carried release source archive used for reproduction, and the signed artifact URL.
 
-This repository is the "written offer" referenced in the app's **About → Acknowledgments**
-screen.
+This repository is the public evidence and source-discovery location referenced from the
+app's **About → Acknowledgments** screen. Whether a particular distribution satisfies
+all applicable license obligations depends on that distribution and its complete record;
+the repository index alone does not establish that conclusion.
 
 ## Components we redistribute under GPL / LGPL
 
@@ -32,24 +38,63 @@ Notes:
 
 ## How to find the source for *your* version
 
-The corresponding source you are entitled to is the one matching the **exact binary you
-received**, so records are kept **per binary version** under each component's
-`versions/` directory. Each record lists the exact upstream tag, a `fetch` line that
-downloads and checksum-verifies that source, and the exact configure/build commands used.
+The corresponding source must match the **exact binary received**. Generated records are
+kept under each component's `versions/` directory and include the binary SHA-256. A
+generated record points only to the source archive captured during the build and to its
+recorded SHA-256 and byte length; it never asks a reviewer to rediscover provenance by
+resolving an upstream tag or `latest` URL again. fetchii-core v3 records additionally
+carry the exact yt-dlp tag and commit and a canonical v2 lock containing exact CPython
+and pip versions for a macOS/universal2 toolchain, every dependency resolved across all
+six build scopes, immutable PyPI artifact URLs, and source hashes. An independent
+canonical release manifest supplies the expected display version, artifact URL and
+artifact SHA-256; record policy never accepts those claims merely because the record
+asserts them itself.
 
-Binary versions are recorded automatically by our build pipeline the moment a binary is
-built — so a record exists for every version we have ever distributed. The optional
-[`fetchii-releases.md`](fetchii-releases.md) maps each Fetchii app release to the binary
-versions it shipped, for convenience.
+Immutable release paths are version-keyed rather than digest-suffixed:
+`aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
+`fetchii-core/versions/locks/{version}.json`. Each core record also requires the fixed
+sidecar `fetchii-core/versions/manifests/{version}.json`, whose canonical bytes bind to
+the corresponding input-lock digest. Each aria2 v3 record likewise requires canonical
+`aria2/versions/evidence/{version}.json`, which binds its exact record hash and the
+separate source/archive/artifact roles. Reusing a version with different bytes is a
+conflict, not a new filename. Core records accept only the matching artifact URL
+`https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`;
+`latest`, a foreign host, or another path is invalid. Version records are top-level
+files; nested record directories other than the fixed core `locks/` and `manifests/`
+sidecars and aria2 `evidence/` sidecar are rejected and never indexed.
+
+Pull-request policy compares every existing record, core lock, core release-manifest,
+and aria2 evidence byte against the exact base commit. Existing protected paths cannot
+be edited, replaced, or deleted; a release is represented only by adding new
+fixed-version paths. The check fails closed when the base commit or its history is
+unavailable locally.
+
+New aria2 records must use the deterministic v3 format. Its three URL roles are fixed
+and non-interchangeable: the upstream URL is provenance only, reproduction uses the
+carried source archive published with the release, and the signed artifact has its own
+release asset URL. The repository policy rejects role substitution, malformed or
+uppercase digests, missing/orphan evidence, older schemas, and extra record bytes.
+
+The deterministic [`fetchii-releases.md`](fetchii-releases.md) page is a convenience
+index of component records. It is generated from the repository tree and checked in CI;
+the per-component records remain the primary path. The index does not claim to map app
+release numbers and does not turn a legacy recipe into a locked record.
+
+The required Builder protocol is record-first: source/lock inputs are staged first, the
+OSS record and its canonical sidecar evidence are preserved with a fast-forward-safe
+retry, and only then may a GitHub Release, core binary object, or client `version.json`
+become visible. This repository documents and validates the record format; Builder
+workflow policy must separately verify that a production path enforces the ordering.
 
 License texts live next to each component (`aria2/GPLv2.txt`, `ffmpeg/LGPLv2.1.txt`,
 `fetchii-core/GPLv2.txt`).
 
-## Written offer
+## Source-availability contact
 
-For any version of Fetchii distributed within the past **three (3) years**, Entromoonic,
-Ltd. will also provide the complete corresponding source code for the GPL/LGPL components
-on physical media at cost, on request. Contact: **contact@entromoonic.com**.
+For questions or requests concerning the corresponding source associated with a
+particular Fetchii distribution, contact **contact@entromoonic.com**. This discovery
+page does not state a legal conclusion about a particular distribution or replace the
+terms accompanying it.
 
 ## What is intentionally not here
 
