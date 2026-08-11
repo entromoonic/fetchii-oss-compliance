@@ -1404,6 +1404,14 @@ def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     if not re.search(r"(?m)^permissions:\n  contents: read\n\njobs:", contents):
         errors.append(f"{label}: workflow permissions must remain read-only")
+    runtime_pattern = re.compile(
+        r"(?m)^  offline-policy:\n"
+        r"    runs-on: ubuntu-24\.04\n"
+        r"    timeout-minutes: 10\n"
+        r"    steps:$"
+    )
+    if not runtime_pattern.search(contents):
+        errors.append(f"{label}: offline policy timeout must remain exactly 10 minutes")
     checkout_pattern = re.compile(
         r"(?m)^      - name: Checkout immutable record tree\n"
         r"        uses: actions/checkout@[0-9a-f]{40}(?: #[^\n]*)?\n"
