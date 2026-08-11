@@ -39,6 +39,7 @@ PACKAGE_VERSION = re.compile(
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 CORE_RECORD_SCHEMA = "fetchii-core-record/v3"
 ARIA2_RECORD_SCHEMA = "aria2-record/v3"
+ARIA2_BUILDER_REPOSITORY = "dynamicfire/fetchii-aria2-builder"
 CORE_MANIFEST_SCHEMA_VERSION = 1
 CORE_SOURCE_REPOSITORY = "https://github.com/yt-dlp/yt-dlp.git"
 CORE_SOURCE_HOST = "downloads.beamdrop.entromoonic.com"
@@ -792,7 +793,7 @@ def aria2_release_urls(version: str) -> tuple[str, str, str]:
     if not SEMVER.fullmatch(version):
         raise ComplianceError("aria2 version must be an exact semantic version")
     release_root = (
-        "https://github.com/entromoonic/fetchii-aria2-builder/"
+        f"https://github.com/{ARIA2_BUILDER_REPOSITORY}/"
         f"releases/download/aria2-v{version}"
     )
     return (
@@ -1403,6 +1404,14 @@ def workflow_policy_errors(*, root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     if not re.search(r"(?m)^permissions:\n  contents: read\n\njobs:", contents):
         errors.append(f"{label}: workflow permissions must remain read-only")
+    runtime_pattern = re.compile(
+        r"(?m)^  offline-policy:\n"
+        r"    runs-on: ubuntu-24\.04\n"
+        r"    timeout-minutes: 10\n"
+        r"    steps:$"
+    )
+    if not runtime_pattern.search(contents):
+        errors.append(f"{label}: offline policy timeout must remain exactly 10 minutes")
     checkout_pattern = re.compile(
         r"(?m)^      - name: Checkout immutable record tree\n"
         r"        uses: actions/checkout@[0-9a-f]{40}(?: #[^\n]*)?\n"

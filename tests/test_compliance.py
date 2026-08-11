@@ -681,6 +681,64 @@ class CompliancePolicyTests(unittest.TestCase):
                 "locked v3 record",
             )
 
+    def test_aria2_v3_uses_the_canonical_dynamicfire_builder_identity(self) -> None:
+        version = "1.38.0"
+        _, source_archive_url, artifact_url = check_compliance.aria2_release_urls(
+            version
+        )
+        expected_root = (
+            "https://github.com/dynamicfire/fetchii-aria2-builder/"
+            f"releases/download/aria2-v{version}"
+        )
+        self.assertEqual(source_archive_url, f"{expected_root}/aria2.tar.xz")
+        self.assertEqual(artifact_url, f"{expected_root}/aria2c-signed.zip")
+        self.assertEqual(
+            check_compliance.ARIA2_BUILDER_REPOSITORY,
+            "dynamicfire/fetchii-aria2-builder",
+        )
+        self.assertEqual(
+            generate_index.ARIA2_BUILDER_REPOSITORY,
+            "dynamicfire/fetchii-aria2-builder",
+        )
+
+    def test_aria2_v3_rejects_the_nonexistent_legacy_builder_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record, evidence = self.make_aria2_record_tree(root)
+            current = b"dynamicfire/fetchii-aria2-builder"
+            nonexistent = b"entromoonic/fetchii-aria2-builder"
+            record.write_bytes(record.read_bytes().replace(current, nonexistent))
+            evidence_value = json.loads(evidence.read_text(encoding="utf-8"))
+            for key in ("sourceArchiveUrl", "artifactUrl"):
+                evidence_value[key] = evidence_value[key].replace(
+                    current.decode("ascii"), nonexistent.decode("ascii")
+                )
+            evidence_value["recordSha256"] = hashlib.sha256(
+                record.read_bytes()
+            ).hexdigest()
+            evidence.write_bytes(
+                check_compliance.canonical_json_bytes(evidence_value)
+            )
+
+            errors = check_compliance.validate_aria2_v3_record(
+                record,
+                evidence,
+                root=root,
+            )
+            self.assertTrue(
+                any("release URL is invalid" in error for error in errors),
+                errors,
+            )
+            contents = record.read_text(encoding="utf-8")
+            self.assertNotEqual(
+                check_compliance.record_status("aria2", contents),
+                "locked v3 record",
+            )
+            self.assertNotEqual(
+                generate_index.status("aria2", contents),
+                "locked v3 record",
+            )
+
     def test_aria2_v3_rejects_role_schema_digest_and_byte_substitution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -884,6 +942,21 @@ class CompliancePolicyTests(unittest.TestCase):
 
     def test_repository_pins_every_pre_policy_recipe_byte(self) -> None:
         self.assertEqual(check_compliance.historical_repository_errors(), [])
+
+    def test_historical_aria2_recipe_stays_accepted_without_rewriting(self) -> None:
+        record = ROOT / "aria2" / "versions" / "1.37.0.md"
+        self.assertEqual(
+            hashlib.sha256(record.read_bytes()).hexdigest(),
+            check_compliance.HISTORICAL_ARIA2_RECIPE_SHA256["1.37.0"],
+        )
+        self.assertEqual(
+            check_compliance.validate_historical_recipe(
+                record,
+                component="aria2",
+                expected_digests=check_compliance.HISTORICAL_ARIA2_RECIPE_SHA256,
+            ),
+            [],
+        )
 
     def test_core_record_full_byte_oracle_rejects_every_unlocked_field(self) -> None:
         mutations = (
