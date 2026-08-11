@@ -16,6 +16,7 @@ OUTPUT = ROOT / "fetchii-releases.md"
 COMPONENTS = ("aria2", "fetchii-core", "ffmpeg")
 SHA_IN_RECORD = re.compile(r"sha256: ([0-9a-f]{64})")
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+ARIA2_BUILDER_REPOSITORY = "dynamicfire/fetchii-aria2-builder"
 
 
 def is_locked_aria2_v3(contents: str) -> bool:
@@ -33,7 +34,7 @@ def is_locked_aria2_v3(contents: str) -> bool:
     if not SEMVER.fullmatch(version):
         return False
     release_root = (
-        "https://github.com/entromoonic/fetchii-aria2-builder/"
+        f"https://github.com/{ARIA2_BUILDER_REPOSITORY}/"
         f"releases/download/aria2-v{version}"
     )
     origin_url = (

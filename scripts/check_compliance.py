@@ -39,6 +39,7 @@ PACKAGE_VERSION = re.compile(
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 CORE_RECORD_SCHEMA = "fetchii-core-record/v3"
 ARIA2_RECORD_SCHEMA = "aria2-record/v3"
+ARIA2_BUILDER_REPOSITORY = "dynamicfire/fetchii-aria2-builder"
 CORE_MANIFEST_SCHEMA_VERSION = 1
 CORE_SOURCE_REPOSITORY = "https://github.com/yt-dlp/yt-dlp.git"
 CORE_SOURCE_HOST = "downloads.beamdrop.entromoonic.com"
@@ -792,7 +793,7 @@ def aria2_release_urls(version: str) -> tuple[str, str, str]:
     if not SEMVER.fullmatch(version):
         raise ComplianceError("aria2 version must be an exact semantic version")
     release_root = (
-        "https://github.com/entromoonic/fetchii-aria2-builder/"
+        f"https://github.com/{ARIA2_BUILDER_REPOSITORY}/"
         f"releases/download/aria2-v{version}"
     )
     return (
