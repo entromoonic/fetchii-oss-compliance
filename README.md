@@ -7,8 +7,9 @@ redistributed binaries. Generated core v3 records bind an exact binary digest to
 locked source object, source revision, exact toolchain, and deterministic dependency
 lock. Older recipe-only entries are retained and explicitly labelled as legacy; their
 presence is not presented as proof that a missing historical digest was captured.
-Generated aria2 v3 records separately bind the canonical upstream origin URL, the
-carried release source archive used for reproduction, and the signed artifact URL.
+Generated aria2 v4 records separately bind a Builder release version and an upstream
+aria2 version, plus the canonical upstream origin URL, the carried release source
+archive used for reproduction, and the signed artifact URL.
 
 This repository is the public evidence and source-discovery location referenced from the
 app's **About → Acknowledgments** screen. Whether a particular distribution satisfies
@@ -51,12 +52,14 @@ artifact SHA-256; record policy never accepts those claims merely because the re
 asserts them itself.
 
 Immutable release paths are version-keyed rather than digest-suffixed:
-`aria2/versions/{version}.md`, `fetchii-core/versions/{version}.md`, and
+`aria2/versions/{releaseVersion}.md`, `fetchii-core/versions/{version}.md`, and
 `fetchii-core/versions/locks/{version}.json`. Each core record also requires the fixed
 sidecar `fetchii-core/versions/manifests/{version}.json`, whose canonical bytes bind to
-the corresponding input-lock digest. Each aria2 v3 record likewise requires canonical
-`aria2/versions/evidence/{version}.json`, which binds its exact record hash and the
-separate source/archive/artifact roles. Reusing a version with different bytes is a
+the corresponding input-lock digest. Each aria2 v4 record likewise requires canonical
+`aria2/versions/evidence/{releaseVersion}.json`, which binds its exact record hash and the
+separate release/upstream identities and source/archive/artifact roles. The fixed path
+and Builder release URLs use `releaseVersion`; the upstream URL and source revision use
+`upstreamVersion`. Reusing a release version with different bytes is a
 conflict, not a new filename. Core records accept only the matching artifact URL
 `https://downloads.beamdrop.entromoonic.com/fetchii-core/fetchii-core_macos_{version}.tar.gz`;
 `latest`, a foreign host, or another path is invalid. Version records are top-level
@@ -69,8 +72,9 @@ be edited, replaced, or deleted; a release is represented only by adding new
 fixed-version paths. The check fails closed when the base commit or its history is
 unavailable locally.
 
-New aria2 records must use the deterministic v3 format. Its three URL roles are fixed
-and non-interchangeable: the upstream URL is provenance only, reproduction uses the
+New aria2 records must use the deterministic v4 format. Its two version identities and
+three URL roles are fixed and non-interchangeable: the upstream URL is provenance only,
+reproduction uses the
 carried source archive published with the release, and the signed artifact has its own
 release asset URL. The repository policy rejects role substitution, malformed or
 uppercase digests, missing/orphan evidence, older schemas, and extra record bytes.

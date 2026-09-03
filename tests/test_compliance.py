@@ -237,27 +237,30 @@ class CompliancePolicyTests(unittest.TestCase):
         self,
         root: Path,
         *,
-        version: str = "1.38.0",
+        release_version: str = "1.38.0",
+        upstream_version: str = "1.37.0",
     ) -> tuple[Path, Path]:
         for component in ("aria2", "fetchii-core", "ffmpeg"):
             (root / component / "versions").mkdir(parents=True, exist_ok=True)
         source_digest = "d" * 64
         artifact_digest = "e" * 64
         record_raw = check_compliance.render_aria2_record(
-            version,
+            release_version,
+            upstream_version,
             source_digest,
             artifact_digest,
         )
-        record = root / "aria2" / "versions" / f"{version}.md"
+        record = root / "aria2" / "versions" / f"{release_version}.md"
         record.write_bytes(record_raw)
         origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
-            version
+            release_version, upstream_version
         )
         evidence = {
-            "schemaVersion": 3,
+            "schemaVersion": 4,
             "component": "aria2",
-            "version": version,
-            "sourceRevision": f"release-{version}",
+            "releaseVersion": release_version,
+            "upstreamVersion": upstream_version,
+            "sourceRevision": f"release-{upstream_version}",
             "sourceOriginUrl": origin_url,
             "sourceArchiveUrl": archive_url,
             "sourceArchiveSha256": source_digest,
@@ -265,7 +268,9 @@ class CompliancePolicyTests(unittest.TestCase):
             "artifactUrl": artifact_url,
             "recordSha256": hashlib.sha256(record_raw).hexdigest(),
         }
-        evidence_path = root / "aria2" / "versions" / "evidence" / f"{version}.json"
+        evidence_path = (
+            root / "aria2" / "versions" / "evidence" / f"{release_version}.json"
+        )
         evidence_path.parent.mkdir()
         evidence_path.write_bytes(check_compliance.canonical_json_bytes(evidence))
         return record, evidence_path
@@ -658,12 +663,12 @@ class CompliancePolicyTests(unittest.TestCase):
             )
             self.assertEqual(check_compliance.generated_record_errors(root=root), [])
 
-    def test_aria2_v3_record_and_canonical_evidence_are_one_fixed_pair(self) -> None:
+    def test_aria2_v4_record_and_canonical_evidence_are_one_fixed_pair(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
             self.assertEqual(
-                check_compliance.validate_aria2_v3_record(
+                check_compliance.validate_aria2_v4_record(
                     record,
                     evidence,
                     root=root,
@@ -674,24 +679,32 @@ class CompliancePolicyTests(unittest.TestCase):
             contents = record.read_text(encoding="utf-8")
             self.assertEqual(
                 check_compliance.record_status("aria2", contents),
-                "locked v3 record",
+                "locked v4 record",
             )
             self.assertEqual(
                 generate_index.status("aria2", contents),
-                "locked v3 record",
+                "locked v4 record",
             )
 
-    def test_aria2_v3_uses_the_canonical_dynamicfire_builder_identity(self) -> None:
-        version = "1.38.0"
-        _, source_archive_url, artifact_url = check_compliance.aria2_release_urls(
-            version
+    def test_aria2_v4_uses_separate_upstream_and_builder_release_identities(
+        self,
+    ) -> None:
+        release_version = "1.38.0"
+        upstream_version = "1.37.0"
+        origin_url, source_archive_url, artifact_url = (
+            check_compliance.aria2_release_urls(release_version, upstream_version)
         )
         expected_root = (
             "https://github.com/dynamicfire/fetchii-aria2-builder/"
-            f"releases/download/aria2-v{version}"
+            f"releases/download/aria2-v{release_version}"
         )
         self.assertEqual(source_archive_url, f"{expected_root}/aria2.tar.xz")
         self.assertEqual(artifact_url, f"{expected_root}/aria2c-signed.zip")
+        self.assertEqual(
+            origin_url,
+            "https://github.com/aria2/aria2/releases/download/"
+            "release-1.37.0/aria2-1.37.0.tar.xz",
+        )
         self.assertEqual(
             check_compliance.ARIA2_BUILDER_REPOSITORY,
             "dynamicfire/fetchii-aria2-builder",
@@ -701,7 +714,7 @@ class CompliancePolicyTests(unittest.TestCase):
             "dynamicfire/fetchii-aria2-builder",
         )
 
-    def test_aria2_v3_rejects_the_nonexistent_legacy_builder_owner(self) -> None:
+    def test_aria2_v4_rejects_the_nonexistent_legacy_builder_owner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
@@ -716,11 +729,9 @@ class CompliancePolicyTests(unittest.TestCase):
             evidence_value["recordSha256"] = hashlib.sha256(
                 record.read_bytes()
             ).hexdigest()
-            evidence.write_bytes(
-                check_compliance.canonical_json_bytes(evidence_value)
-            )
+            evidence.write_bytes(check_compliance.canonical_json_bytes(evidence_value))
 
-            errors = check_compliance.validate_aria2_v3_record(
+            errors = check_compliance.validate_aria2_v4_record(
                 record,
                 evidence,
                 root=root,
@@ -732,20 +743,22 @@ class CompliancePolicyTests(unittest.TestCase):
             contents = record.read_text(encoding="utf-8")
             self.assertNotEqual(
                 check_compliance.record_status("aria2", contents),
-                "locked v3 record",
+                "locked v4 record",
             )
             self.assertNotEqual(
                 generate_index.status("aria2", contents),
-                "locked v3 record",
+                "locked v4 record",
             )
 
-    def test_aria2_v3_rejects_role_schema_digest_and_byte_substitution(self) -> None:
+    def test_aria2_v4_rejects_role_schema_identity_digest_and_byte_substitution(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
             original = record.read_bytes()
             origin_url, archive_url, artifact_url = check_compliance.aria2_release_urls(
-                "1.38.0"
+                "1.38.0", "1.37.0"
             )
             role_placeholder = b"https://invalid.local/role-placeholder"
             roles_swapped = (
@@ -759,7 +772,17 @@ class CompliancePolicyTests(unittest.TestCase):
             )
             mutations = {
                 "old schema": original.replace(
-                    b"aria2-record/v3", b"aria2-record/v2", 1
+                    b"aria2-record/v4", b"aria2-record/v3", 1
+                ),
+                "release version substituted with upstream": original.replace(
+                    b"- **Release version:** `1.38.0`",
+                    b"- **Release version:** `1.37.0`",
+                    1,
+                ),
+                "upstream version substituted with release": original.replace(
+                    b"- **Upstream version:** `1.37.0`",
+                    b"- **Upstream version:** `1.38.0`",
+                    1,
                 ),
                 "origin as carried archive": original.replace(
                     archive_url.encode("utf-8"), origin_url.encode("utf-8"), 1
@@ -781,7 +804,7 @@ class CompliancePolicyTests(unittest.TestCase):
                 with self.subTest(label=label):
                     record.write_bytes(payload)
                     self.assertTrue(
-                        check_compliance.validate_aria2_v3_record(
+                        check_compliance.validate_aria2_v4_record(
                             record,
                             evidence,
                             root=root,
@@ -789,7 +812,7 @@ class CompliancePolicyTests(unittest.TestCase):
                     )
             record.write_bytes(original)
 
-    def test_aria2_v3_rejects_missing_or_forged_evidence(self) -> None:
+    def test_aria2_v4_rejects_missing_or_forged_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
@@ -804,6 +827,14 @@ class CompliancePolicyTests(unittest.TestCase):
                     **original,
                     "artifactUrl": original["sourceArchiveUrl"],
                 },
+                "release replayed as upstream": {
+                    **original,
+                    "upstreamVersion": original["releaseVersion"],
+                },
+                "upstream replayed as release": {
+                    **original,
+                    "releaseVersion": original["upstreamVersion"],
+                },
                 "extra field": {**original, "unexpected": "value"},
                 "boolean schema": {**original, "schemaVersion": True},
             }
@@ -811,7 +842,7 @@ class CompliancePolicyTests(unittest.TestCase):
                 with self.subTest(label=label):
                     evidence.write_bytes(check_compliance.canonical_json_bytes(value))
                     self.assertTrue(
-                        check_compliance.validate_aria2_v3_record(
+                        check_compliance.validate_aria2_v4_record(
                             record,
                             evidence,
                             root=root,
@@ -819,7 +850,7 @@ class CompliancePolicyTests(unittest.TestCase):
                     )
             evidence.unlink()
             self.assertTrue(
-                check_compliance.validate_aria2_v3_record(
+                check_compliance.validate_aria2_v4_record(
                     record,
                     evidence,
                     root=root,
@@ -830,10 +861,10 @@ class CompliancePolicyTests(unittest.TestCase):
             orphan.write_bytes(evidence.read_bytes())
             errors = check_compliance.generated_record_errors(root=root)
             self.assertTrue(
-                any("evidence has no locked v3 record" in error for error in errors)
+                any("evidence has no locked v4 record" in error for error in errors)
             )
 
-    def test_aria2_v3_rejects_noncanonical_or_nonregular_evidence(self) -> None:
+    def test_aria2_v4_rejects_noncanonical_or_nonregular_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
@@ -841,11 +872,17 @@ class CompliancePolicyTests(unittest.TestCase):
             for label, payload in {
                 "CRLF": canonical.replace(b"\n", b"\r\n"),
                 "extra byte": canonical + b"\n",
+                "duplicate key": canonical.replace(
+                    b'{"artifactSha256"',
+                    b'{"component":"aria2","artifactSha256"',
+                    1,
+                ),
+                "NaN": canonical.replace(b'"schemaVersion":4', b'"schemaVersion":NaN'),
             }.items():
                 with self.subTest(label=label):
                     evidence.write_bytes(payload)
                     self.assertTrue(
-                        check_compliance.validate_aria2_v3_record(
+                        check_compliance.validate_aria2_v4_record(
                             record,
                             evidence,
                             root=root,
@@ -857,7 +894,7 @@ class CompliancePolicyTests(unittest.TestCase):
             evidence.unlink()
             evidence.symlink_to(backing.name)
             self.assertTrue(
-                check_compliance.validate_aria2_v3_record(
+                check_compliance.validate_aria2_v4_record(
                     record,
                     evidence,
                     root=root,
@@ -867,7 +904,7 @@ class CompliancePolicyTests(unittest.TestCase):
             evidence.unlink()
             os.link(backing, evidence)
             self.assertTrue(
-                check_compliance.validate_aria2_v3_record(
+                check_compliance.validate_aria2_v4_record(
                     record,
                     evidence,
                     root=root,
@@ -886,13 +923,13 @@ class CompliancePolicyTests(unittest.TestCase):
                 )
             )
 
-    def test_aria2_v3_record_filename_must_match_evidence_version(self) -> None:
+    def test_aria2_v4_record_filename_must_match_release_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             record, evidence = self.make_aria2_record_tree(root)
             renamed = record.with_name("1.38.1.md")
             record.rename(renamed)
-            errors = check_compliance.validate_aria2_v3_record(
+            errors = check_compliance.validate_aria2_v4_record(
                 renamed,
                 evidence,
                 root=root,
@@ -936,8 +973,10 @@ class CompliancePolicyTests(unittest.TestCase):
             )
             errors = check_compliance.generated_record_errors(root=root)
             self.assertEqual(
-                sum("must use the locked v3 schema" in error for error in errors),
-                2,
+                sum("must use the locked v4 schema" in error for error in errors), 1
+            )
+            self.assertEqual(
+                sum("must use the locked v3 schema" in error for error in errors), 1
             )
 
     def test_repository_pins_every_pre_policy_recipe_byte(self) -> None:
