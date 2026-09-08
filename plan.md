@@ -8,3 +8,4 @@
 - Completed strict bundle validation and 19 targeted regression tests. All 69 repository tests, the policy check against the actual signed candidate, append-only checks against ec77822fd2690e60a530663b45dc53ae1c4daade, and git diff --check pass.
 - Publish this policy change separately from the unmerged candidate. Its publication job timed out while the required check failed; rerun the existing FFmpeg workflow with the same inputs after the policy PR merges, preserving each run's source and signing evidence identity.
 - No FFmpeg 8.0.1 version record has been merged and no GitHub binary release has been published yet.
+- Corrected the rejected legacy-record diagnostic to name FFmpeg v1. The policy-only PR passed its required offline-policy check; the diagnostic change preserves validation behavior.

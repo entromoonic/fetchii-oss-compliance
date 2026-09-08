@@ -1006,7 +1006,7 @@ def validate_historical_recipe(
     label = display_path(record, root=root)
     expected = expected_digests.get(record.stem)
     if expected is None:
-        schema = "v4" if component == "aria2" else "v3"
+        schema = {"aria2": "v4", "fetchii-core": "v3", "ffmpeg": "v1"}[component]
         return [f"{label}: new {component} records must use the locked {schema} schema"]
     try:
         raw = _stable_regular_bytes(
