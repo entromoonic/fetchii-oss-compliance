@@ -10,6 +10,7 @@ this page does not make a legal sufficiency claim or map app release numbers.
 | Record | Status |
 |---|---|
 | [aria2 1.37.0 — corresponding source](aria2/versions/1.37.0.md) | legacy recipe; digest not recorded |
+| [aria2 Builder release 1.37.1 — corresponding-source record](aria2/versions/1.37.1.md) | locked v4 record |
 
 ## fetchii-core
 
