@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -58,6 +59,9 @@ HISTORICAL_ARIA2_RECIPE_SHA256 = {
 HISTORICAL_CORE_RECIPE_SHA256 = {
     "2026.06.09": "3abaeaf9522a4e53b975dfaab9109d1a8be52dd4749ece00efd03359ee0886ff",
     "2026.07.04": "003839ecc4a1173aecda186f38e2d90a1ad892eef6afe41f35b89cc55029c71f",
+}
+HISTORICAL_FFMPEG_RECIPE_SHA256 = {
+    "8.0": "92084704a8022e84d759fbf193f6c2bc2f430a028b5531f15a907fd7f4844e4b",
 }
 REQUIRED_SCOPES = (
     "runtime",
@@ -1002,7 +1006,7 @@ def validate_historical_recipe(
     label = display_path(record, root=root)
     expected = expected_digests.get(record.stem)
     if expected is None:
-        schema = "v4" if component == "aria2" else "v3"
+        schema = {"aria2": "v4", "fetchii-core": "v3", "ffmpeg": "v1"}[component]
         return [f"{label}: new {component} records must use the locked {schema} schema"]
     try:
         raw = _stable_regular_bytes(
@@ -1022,6 +1026,7 @@ def historical_repository_errors(*, root: Path = ROOT) -> list[str]:
     for component, digests in (
         ("aria2", HISTORICAL_ARIA2_RECIPE_SHA256),
         ("fetchii-core", HISTORICAL_CORE_RECIPE_SHA256),
+        ("ffmpeg", HISTORICAL_FFMPEG_RECIPE_SHA256),
     ):
         for version in sorted(digests):
             record = root / component / "versions" / f"{version}.md"
@@ -1100,6 +1105,7 @@ def _version_tree_errors(
             allowed_directories = {
                 "fetchii-core": {"locks", "manifests"},
                 "aria2": {"evidence"},
+                "ffmpeg": {"locks", "evidence"},
             }
             if entry.name in allowed_directories.get(component, set()):
                 continue
@@ -1120,6 +1126,84 @@ def _version_tree_errors(
     return errors
 
 
+def ffmpeg_record_errors(*, root: Path = ROOT) -> list[str]:
+    """Validate every locked FFmpeg bundle and its exact sidecar paths."""
+    spec = importlib.util.spec_from_file_location(
+        "fetchii_ffmpeg_records", Path(__file__).with_name("ffmpeg_records.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    errors: list[str] = []
+    directory = root / "ffmpeg" / "versions"
+    try:
+        info = directory.lstat()
+    except OSError as error:
+        return [f"{display_path(directory, root=root)}: cannot inspect: {error}"]
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return [f"{display_path(directory, root=root)}: versions path must be a real directory"]
+    for name in ("locks", "evidence"):
+        sidecars = directory / name
+        try:
+            info = sidecars.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            return [f"{display_path(sidecars, root=root)}: cannot inspect: {error}"]
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return [f"{display_path(sidecars, root=root)}: sidecar path must be a real directory"]
+    versions: set[str] = set()
+    for record in sorted(directory.glob("*.md")):
+        if record.name == "TEMPLATE.md":
+            continue
+        try:
+            raw = _stable_regular_bytes(
+                record, label="FFmpeg record", max_bytes=MAX_RECORD_BYTES
+            )
+            if not raw.startswith(b"<!-- fetchii-ffmpeg-record/v1 -->\n"):
+                errors.extend(validate_historical_recipe(
+                    record, component="ffmpeg",
+                    expected_digests=HISTORICAL_FFMPEG_RECIPE_SHA256, root=root,
+                ))
+                continue
+            if not SEMVER.fullmatch(record.stem):
+                raise ComplianceError("FFmpeg record filename must be exact x.y.z")
+            versions.add(record.stem)
+            lock, lock_raw = _load_canonical_json(
+                directory / "locks" / f"{record.stem}.json", label="FFmpeg lock"
+            )
+            evidence, _ = _load_canonical_json(
+                directory / "evidence" / f"{record.stem}.json", label="FFmpeg evidence"
+            )
+            module.validate_bundle(raw, lock, lock_raw, evidence, record.stem)
+        except (ComplianceError, ValueError) as error:
+            errors.append(f"{display_path(record, root=root)}: {error}")
+    for name in ("locks", "evidence"):
+        sidecars = directory / name
+        try:
+            info = sidecars.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            errors.append(f"{display_path(sidecars, root=root)}: cannot inspect: {error}")
+            continue
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            errors.append(f"{display_path(sidecars, root=root)}: sidecar path must be a real directory")
+            continue
+        for path in sorted(sidecars.iterdir()):
+            try:
+                entry = path.lstat()
+            except OSError as error:
+                errors.append(f"{display_path(path, root=root)}: cannot inspect: {error}")
+                continue
+            if (not stat.S_ISREG(entry.st_mode) or stat.S_ISLNK(entry.st_mode)
+                    or entry.st_nlink != 1 or path.suffix != ".json"
+                    or not SEMVER.fullmatch(path.stem)):
+                errors.append(f"{display_path(path, root=root)}: unexpected FFmpeg sidecar path")
+            elif path.stem not in versions:
+                errors.append(f"{display_path(path, root=root)}: FFmpeg sidecar has no locked v1 record")
+    return errors
+
+
 def generated_record_errors(*, root: Path = ROOT) -> list[str]:
     errors: list[str] = []
     for component in ("aria2", "fetchii-core", "ffmpeg"):
@@ -1128,6 +1212,8 @@ def generated_record_errors(*, root: Path = ROOT) -> list[str]:
                 root / component / "versions", component=component, root=root
             )
         )
+
+    errors.extend(ffmpeg_record_errors(root=root))
 
     aria_directory = root / "aria2" / "versions"
     locked_aria_versions: set[str] = set()
@@ -1317,6 +1403,7 @@ def _is_append_only_record_path(path: str) -> bool:
             and (
                 (component == "fetchii-core" and sidecar in {"locks", "manifests"})
                 or (component == "aria2" and sidecar == "evidence")
+                or (component == "ffmpeg" and sidecar in {"locks", "evidence"})
             )
         )
     return False
