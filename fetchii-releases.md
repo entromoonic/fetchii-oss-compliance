@@ -24,4 +24,5 @@ this page does not make a legal sufficiency claim or map app release numbers.
 
 | Record | Status |
 |---|---|
+| [FFmpeg 8.0.1 — signed universal LGPL build](ffmpeg/versions/8.0.1.md) | legacy/manual record |
 | [FFmpeg 8.0 — corresponding source](ffmpeg/versions/8.0.md) | legacy recipe; digest not recorded |
