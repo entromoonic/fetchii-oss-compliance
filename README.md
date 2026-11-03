@@ -33,9 +33,13 @@ Notes:
   default dependency set bundles **mutagen** (GPLv2-or-later), which is why it is listed
   here. The other bundled dependencies (pycryptodomex, brotli, certifi, requests,
   urllib3, websockets) are under permissive licenses.
-- FFmpeg is built **without** `--enable-gpl` (no x264/x265). It statically links only
-  permissive (BSD/MIT) libraries — libvpx, libopus, libvorbis, libdav1d — and uses
-  Apple VideoToolbox for hardware encoding.
+- FFmpeg is built **without** `--enable-gpl` or `--enable-nonfree` (no x264/x265). It
+  statically links the permissive (BSD/MIT) libraries libvpx, libopus, libvorbis and
+  libdav1d, and uses Apple VideoToolbox for hardware encoding. FFmpeg builds whose
+  records list `--enable-libmp3lame` also statically link the
+  [LAME](https://lame.sourceforge.io/) MP3 encoder library (`libmp3lame`,
+  LGPLv2-or-later, used here under LGPLv2.1); its exact source archive is part of that
+  record's corresponding source. Earlier FFmpeg records do not include LAME.
 
 ## How to find the source for *your* version
 
