@@ -233,6 +233,61 @@ class FFmpegBundleTests(unittest.TestCase):
         self.assert_invalid(replacements=((b"signed universal LGPL build", b"unverified build"),))
         self.assert_invalid(replacements=((b"\n", b"\r\n"),))
 
+    def mp3_bundle(self, *, flags=None, sources=None) -> tuple[bytes, dict, bytes, dict]:
+        lock = copy.deepcopy(self.lock)
+        lock["build"]["configureFlags"] = list(
+            ffmpeg_records.MP3_CONFIGURE_FLAGS if flags is None else flags
+        )
+        if sources is None:
+            sources = lock["sources"] + [{
+                "name": "lame",
+                "archive": "lame-source.tar.gz",
+                "originUrl": "https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz",
+                "revision": "4.0",
+                "releaseUrl": (
+                    "https://github.com/dynamicfire/fetchii-aria2-builder/releases/download/"
+                    f"ffmpeg-v{VERSION}/lame-source.tar.gz"
+                ),
+                "sha256": "3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb",
+                "size": 1496810,
+            }]
+        lock["sources"] = sources
+        raw = canonical(lock)
+        evidence = copy.deepcopy(self.evidence)
+        evidence["inputLockSha256"] = sha256(raw)
+        evidence["recordSha256"] = ""
+        record = ffmpeg_records._render_record(lock, sha256(raw), evidence)
+        evidence["recordSha256"] = sha256(record)
+        return record, lock, raw, evidence
+
+    def test_mp3_profile_with_exact_lame_source_passes(self) -> None:
+        record, lock, raw, evidence = self.mp3_bundle()
+        self.assertIn(b"--enable-libdav1d --enable-libmp3lame --enable-static", record)
+        self.assertIn(b"`lame-source.tar.gz`: revision `4.0`", record)
+        self.assertIsNone(ffmpeg_records.validate_bundle(record, lock, raw, evidence, VERSION))
+
+    def test_profiles_cannot_mix_flags_and_source_sets(self) -> None:
+        legacy_sources = copy.deepcopy(self.lock["sources"])
+        _, mp3_lock, _, _ = self.mp3_bundle()
+        lame = mp3_lock["sources"][-1]
+        cases = {
+            "mp3 flags without lame": dict(sources=legacy_sources),
+            "legacy flags with lame": dict(flags=ffmpeg_records.CONFIGURE_FLAGS),
+            "lame not last": dict(sources=[lame, *legacy_sources]),
+            "lame revision": dict(sources=[*legacy_sources, {**lame, "revision": "3.100"}]),
+            "lame origin": dict(sources=[
+                *legacy_sources,
+                {**lame, "originUrl": "https://example.com/lame-4.0.tar.gz"},
+            ]),
+            "duplicate lame": dict(sources=[*legacy_sources, lame, lame]),
+            "gpl flag": dict(flags=[*ffmpeg_records.MP3_CONFIGURE_FLAGS, "--enable-gpl"]),
+        }
+        for label, overrides in cases.items():
+            with self.subTest(label=label):
+                record, lock, raw, evidence = self.mp3_bundle(**overrides)
+                with self.assertRaises(ValueError):
+                    ffmpeg_records.validate_bundle(record, lock, raw, evidence, VERSION)
+
 
 class FFmpegPolicyIntegrationTests(unittest.TestCase):
     def make_tree(self, root: Path) -> Path:

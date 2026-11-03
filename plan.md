@@ -1,3 +1,9 @@
+# FFmpeg LAME (MP3) build profile — 2026-11-04
+
+- Builder adds LGPL libmp3lame (LAME 4.0) to the FFmpeg build so the app can encode MP3. New Builder locks carry a seventh source, `lame-source.tar.gz`, and the configure flag `--enable-libmp3lame` right after `--enable-libdav1d`.
+- `ffmpeg_records.py` now accepts exactly two build profiles: the historical six-source profile (8.0.1 and the legacy 8.0 recipe stay valid unchanged) and the MP3 profile with LAME as the last source. Flags and source sets cannot be mixed. Records render the flags from the validated lock.
+- No historical record, lock, evidence or the pinned index generator changes. This policy PR must merge before Builder runs an FFmpeg `publish=true` build with LAME, otherwise the record-first compliance PR fails its required check.
+
 # FFmpeg corresponding-source policy support
 
 - Core 2026.08.19 and aria2 Builder 1.37.1 records were published through checked squash PRs.

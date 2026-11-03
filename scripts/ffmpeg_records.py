@@ -26,6 +26,17 @@ CONFIGURE_FLAGS = [
     "--disable-libxcb-shape",
     "--disable-xlib",
 ]
+# Builder releases from the MP3 profile onward also link LGPL libmp3lame (LAME).
+MP3_CONFIGURE_FLAGS = [
+    *CONFIGURE_FLAGS[:5],
+    "--enable-libmp3lame",
+    *CONFIGURE_FLAGS[5:],
+]
+LAME_SOURCE = (
+    "lame",
+    "https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz",
+    "4.0",
+)
 VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 UPSTREAM_VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?"
 SHA256 = r"[0-9a-f]{64}"
@@ -76,7 +87,7 @@ def _render_record(lock: dict, lock_digest: str, evidence: dict) -> bytes:
             f"sha256 `{source['sha256']}`, origin {source['originUrl']}, "
             f"release {source['releaseUrl']}"
         )
-    lines.extend(("", "Build flags: " + " ".join(CONFIGURE_FLAGS), ""))
+    lines.extend(("", "Build flags: " + " ".join(lock["build"]["configureFlags"]), ""))
     return "\n".join(lines).encode("utf-8")
 
 
@@ -104,17 +115,21 @@ def validate_bundle(
         raise ValueError("FFmpeg input lock release identity does not match its path")
     upstream = lock["upstreamVersion"]
     _match(upstream, UPSTREAM_VERSION, "FFmpeg upstream version")
-    if lock["build"] != {
-        "targetPlatform": "macos",
-        "targetArchitecture": "universal2",
-        "license": "LGPL-2.1-or-later",
-        "configureFlags": CONFIGURE_FLAGS,
-    }:
+    profiles = (
+        (CONFIGURE_FLAGS, ()),
+        (MP3_CONFIGURE_FLAGS, (LAME_SOURCE,)),
+    )
+    for flags, extra_descriptors in profiles:
+        if lock["build"] == {
+            "targetPlatform": "macos",
+            "targetArchitecture": "universal2",
+            "license": "LGPL-2.1-or-later",
+            "configureFlags": flags,
+        }:
+            break
+    else:
         raise ValueError("FFmpeg input lock build profile is invalid")
 
-    sources = lock["sources"]
-    if not isinstance(sources, list) or len(sources) != 6:
-        raise ValueError("FFmpeg input lock requires exactly six ordered sources")
     descriptors = (
         ("ffmpeg", f"https://ffmpeg.org/releases/ffmpeg-{upstream}.tar.gz", upstream),
         ("libvpx", "https://chromium.googlesource.com/webm/libvpx", None),
@@ -122,7 +137,11 @@ def validate_bundle(
         ("ogg", "https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz", "1.3.5"),
         ("vorbis", "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz", "1.3.7"),
         ("dav1d", "https://code.videolan.org/videolan/dav1d.git", None),
+        *extra_descriptors,
     )
+    sources = lock["sources"]
+    if not isinstance(sources, list) or len(sources) != len(descriptors):
+        raise ValueError("FFmpeg input lock requires the exact ordered source set of its build profile")
     for source, (name, origin, revision) in zip(sources, descriptors):
         source = _object(
             source,
